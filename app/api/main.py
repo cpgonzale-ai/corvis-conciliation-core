@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
+from app.api.auditoria import router as auditoria_router
 from app.api.auth import router as auth_router
 from app.api.locales import router as locales_router
 from app.api.roles import router as roles_router
@@ -41,6 +42,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(locales_router)
 app.include_router(roles_router)
+app.include_router(auditoria_router)
 
 
 def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, lote_id: Optional[int] = None, detalle: Optional[dict] = None):
