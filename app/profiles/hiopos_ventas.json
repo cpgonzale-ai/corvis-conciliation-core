@@ -6,6 +6,7 @@
   "data_start_row": 1,
   "sheet_index": 1,
   "prefer_sheet_name": "Original",
+  "signature_columns": ["Tipo Documento"],
   "serie_prefijos_no_fiscales": ["FE"],
   "column_mappings": [
     {"source_col": 1, "target_field": "tipo_documento", "type": "string"},

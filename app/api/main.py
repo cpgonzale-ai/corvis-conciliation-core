@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -81,7 +81,12 @@ async def ingest_files(
             with open(tmp_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
-            rows, cortes = engine.ingest_file(tmp_path, profile_id, local_name)
+            try:
+                rows, cortes = engine.ingest_file(tmp_path, profile_id, local_name)
+            except ValueError as e:
+                # El archivo no corresponde al sistema elegido (firma no encontrada) — se
+                # bloquea acá, antes de crear ningún lote, para que el Paso 1 no avance.
+                raise HTTPException(status_code=422, detail=str(e))
             all_rows.extend(rows)
             for c in cortes:
                 all_cortes.append({**c, "archivo": file.filename, "local": local_name})

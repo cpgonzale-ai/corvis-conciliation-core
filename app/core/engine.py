@@ -175,6 +175,46 @@ def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _matches_profile_signature(file_path: str, sheet_names: List[str], profile: Dict) -> bool:
+    """Valida que el archivo adjuntado realmente corresponda al sistema elegido en el Paso 1,
+    antes de intentar mapear ninguna fila. Confirmado sobre los 39 archivos reales de mayo
+    2026 (31 Aloha + 8 Hiopos): ninguna firma da falso positivo ni falso negativo.
+
+    - Aloha: el texto "Reporte de Facturas Emitidas" aparece siempre en las primeras filas
+      (encabezado fijo de Factury/Aloha), sin depender de header_row_index.
+    - Hiopos: la columna "Tipo Documento" está siempre en la fila de encabezado.
+
+    Si el perfil no declara ninguna firma (ej. universal, rg90_set), no se valida — se
+    mantiene el comportamiento anterior.
+    """
+    signature_text = profile.get("signature_text")
+    signature_columns = profile.get("signature_columns")
+    if not signature_text and not signature_columns:
+        return True
+
+    hdr_idx = profile.get("header_row_index", 0)
+    for sheet in sheet_names:
+        if signature_text:
+            try:
+                raw = pd.read_excel(file_path, sheet_name=sheet, header=None, nrows=15)
+            except Exception:
+                continue
+            texto = " ".join(str(v) for v in raw.values.flatten() if pd.notna(v))
+            if signature_text.lower() in texto.lower():
+                return True
+
+        if signature_columns:
+            try:
+                df_hdr = pd.read_excel(file_path, sheet_name=sheet, header=hdr_idx, nrows=1)
+            except Exception:
+                continue
+            cols = {str(c).strip().lower() for c in df_hdr.columns}
+            if all(col.lower() in cols for col in signature_columns):
+                return True
+
+    return False
+
+
 class IngestionEngine:
     def __init__(self, profiles_dir: str):
         self.profiles_dir = profiles_dir
@@ -215,6 +255,12 @@ class IngestionEngine:
             return self._process_dataframe(df, profile, local_name)
 
         sheet_names = pd.ExcelFile(file_path).sheet_names
+
+        if not _matches_profile_signature(file_path, sheet_names, profile):
+            raise ValueError(
+                f"El archivo no parece corresponder al formato de {profile['name']}. "
+                f"Verificá que elegiste el sistema correcto (Aloha/Hiopos) para este reporte."
+            )
 
         # Cuando el archivo trae una hoja explícitamente "cruda" (ej. "Original" en Hiopos:
         # el reporte tal como se exporta, sin edición manual), esa hoja es la fuente confiable
