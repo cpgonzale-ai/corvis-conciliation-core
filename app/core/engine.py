@@ -135,6 +135,11 @@ def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
     ncols = len(df.columns)
     extra_rows: List[List[Any]] = []
 
+    # Los valores reparados son texto (vienen de partir la celda por ';'), aunque la columna
+    # sea numérica en el resto del archivo — se pasa todo el DataFrame a dtype "object" antes
+    # de escribir para evitar el warning/futuro error de pandas por tipo incompatible.
+    df = df.astype(object)
+
     for row_idx in df.index:
         for col_pos in range(ncols):
             val = df.iat[row_idx, col_pos]
@@ -210,7 +215,22 @@ class IngestionEngine:
             return self._process_dataframe(df, profile, local_name)
 
         sheet_names = pd.ExcelFile(file_path).sheet_names
-        candidatos = [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet]
+
+        # Cuando el archivo trae una hoja explícitamente "cruda" (ej. "Original" en Hiopos:
+        # el reporte tal como se exporta, sin edición manual), esa hoja es la fuente confiable
+        # y va primera en el orden de candidatos — antes incluso que sheet_index — porque
+        # otras hojas del mismo archivo (ej. "SOLO VENTAS") pueden estar editadas a mano y
+        # les puede faltar comprobantes reales que sí están en la cruda (confirmado sobre un
+        # caso real: 282 comprobantes de Libro Ventas Fabric.xls solo existen en "Original").
+        # En los archivos reales (una sola hoja sin nombre) esto no cambia nada.
+        prefer_name = str(profile.get("prefer_sheet_name", "")).strip().lower()
+        candidatos = []
+        if prefer_name:
+            for i, name in enumerate(sheet_names):
+                if str(name).strip().lower() == prefer_name:
+                    candidatos.append(i)
+                    break
+        candidatos += [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet and i not in candidatos]
 
         rows: List[Dict[str, Any]] = []
         cortes: List[Dict[str, Any]] = []
@@ -292,6 +312,18 @@ class IngestionEngine:
             serie_norm = fix_mojibake(serie)
             if serie_norm.lower() in ["anulación", "anulacion"]:
                 continue
+
+            # Algunos locales de Hiopos anteponen un prefijo sin significado fiscal a la
+            # serie (ej. "FE" de "Factura Electrónica": FE045-001) que no forma parte del
+            # punto de expedición real y antes hacía que la serie no calzara con el patrón
+            # EEE-PPP, descartando comprobantes válidos por completo (confirmado sobre un
+            # caso real: 879-1.063 facturas reales de Fabric Sushi se perdían enteras por
+            # esto). El prefijo se declara en el perfil, no se hardcodea acá.
+            for prefijo in profile.get("serie_prefijos_no_fiscales", []):
+                if serie_norm.upper().startswith(prefijo.upper()):
+                    serie_norm = serie_norm[len(prefijo):]
+                    break
+
             # Series internas no fiscales (ej. mermas, invitaciones/cortesías en Hiopos) no
             # tienen el formato EEE-PPP de un punto de expedición real y deben descartarse.
             if serie_norm and not SERIE_PATTERN.match(serie_norm.upper()):
