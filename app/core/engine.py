@@ -118,6 +118,58 @@ def _extract_corte(raw_row: List[Any], seccion: str) -> Optional[Dict[str, Any]]
     }
 
 
+def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Repara celdas donde, por un error de exportación o de edición manual del archivo de
+    origen, terminaron pegadas varias filas completas dentro de una sola celda de texto
+    (separadas por saltos de línea, con los campos de cada fila unidos por ';'). Confirmado
+    sobre un archivo real (Libro Ventas Fabric.xls, hoja "Original", columna "Contacto"):
+    esa única celda tenía 209 filas de venta completas embebidas — sin este arreglo esas
+    filas quedan totalmente invisibles para el motor, no como filtradas sino como si nunca
+    hubiesen existido en el DataFrame.
+
+    Reconstruye dos cosas: (1) los valores que le correspondían a la propia fila afectada,
+    a partir de esa misma columna en adelante, y (2) cada fila adicional embebida, agregada
+    como una fila nueva al final del DataFrame — se procesan después exactamente igual que
+    cualquier otra fila (mismos filtros, mismo mapeo de columnas).
+    """
+    ncols = len(df.columns)
+    extra_rows: List[List[Any]] = []
+
+    for row_idx in df.index:
+        for col_pos in range(ncols):
+            val = df.iat[row_idx, col_pos]
+            if not isinstance(val, str) or "\n" not in val:
+                continue
+
+            segments = val.split("\n")
+
+            # La primera "línea" de la celda son los valores que le tocaban a esta misma
+            # fila desde esta columna en adelante (el resto de sus propias columnas
+            # terminó vacío porque todo se fue a parar acá).
+            own_parts = segments[0].split(";")
+            for offset, part in enumerate(own_parts):
+                target_col = col_pos + offset
+                if target_col < ncols:
+                    df.iat[row_idx, target_col] = part.strip() or None
+
+            # Las líneas siguientes son filas completas independientes (ancho de columnas
+            # del archivo) que quedaron atrapadas en la misma celda.
+            for seg in segments[1:]:
+                parts = seg.split(";")
+                if len(parts) < ncols - 2:
+                    continue  # no calza con el ancho de una fila real — se descarta
+                new_row = [None] * ncols
+                for i in range(min(len(parts), ncols)):
+                    new_row[i] = parts[i].strip() or None
+                extra_rows.append(new_row)
+
+    if extra_rows:
+        extra_df = pd.DataFrame(extra_rows, columns=df.columns)
+        df = pd.concat([df, extra_df], ignore_index=True)
+
+    return df
+
+
 class IngestionEngine:
     def __init__(self, profiles_dir: str):
         self.profiles_dir = profiles_dir
@@ -154,6 +206,7 @@ class IngestionEngine:
 
         if ext not in [".xls", ".xlsx"]:
             df = self._read_source(file_path, ext, hdr_idx, preferred_sheet)
+            df = _repair_embedded_rows(df)
             return self._process_dataframe(df, profile, local_name)
 
         sheet_names = pd.ExcelFile(file_path).sheet_names
@@ -165,6 +218,7 @@ class IngestionEngine:
             if idx >= len(sheet_names):
                 continue
             df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx)
+            df = _repair_embedded_rows(df)
             rows, cortes = self._process_dataframe(df, profile, local_name)
             if rows:
                 break
