@@ -444,7 +444,11 @@ class IngestionEngine:
                 estado = "Anulada"
 
             def _fmt(n: float) -> str:
-                return f"{int(n):,}".replace(",", ".")
+                # Sin redondear a entero: se muestra tal como viene calculado del Excel, con
+                # decimales (ej. al clasificar la tasa de IVA, gravada = total / 1.1 no da un
+                # número redondo). Formato es-PY: punto de miles, coma decimal.
+                s = f"{n:,.2f}"
+                return s.replace(",", "§").replace(".", ",").replace("§", ".")
 
             processed_rows.append({
                 "doc": doc,
