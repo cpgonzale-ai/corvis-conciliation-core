@@ -1,0 +1,27 @@
+{
+  "profile_id": "rg90_set",
+  "name": "RG90 — SET / DNIT (Paraguay)",
+  "description": "Perfil de mapeo declarativo para reportes oficiales de la RG90 descargados del sistema Marangatu / SET",
+  "header_row_index": 0,
+  "data_start_row": 1,
+  "column_mappings": [
+    {"source_name": "RUC / Nº de Identificacion del Informado", "target_field": "ruc", "type": "string"},
+    {"source_name": "Nombre o Razón Social del Informado", "target_field": "nombre_cliente", "type": "string"},
+    {"source_name": "Tipo de Comprobante", "target_field": "tipo_comprobante", "type": "string"},
+    {"source_name": "Numero de Comprobante", "target_field": "numero_comprobante", "type": "invoice_number"},
+    {"source_name": "Fecha de Emision", "target_field": "fecha", "type": "date"},
+    {"source_name": "Monto Gravado 10%", "target_field": "gravada_10", "type": "numeric"},
+    {"source_name": "IVA 10%", "target_field": "iva_10", "type": "numeric"},
+    {"source_name": "Monto Gravado 5%", "target_field": "gravada_5", "type": "numeric"},
+    {"source_name": "IVA 5%", "target_field": "iva_5", "type": "numeric"},
+    {"source_name": "Monto No Gravado / Exento ", "target_field": "exenta", "type": "numeric"},
+    {"source_name": "Total Comprobante", "target_field": "total", "type": "numeric"}
+  ],
+  "filter_rules": [
+    {"field": "numero_comprobante", "operator": "not_empty"}
+  ],
+  "defaults": {
+    "ruc_null_fallback": "X",
+    "nombre_null_fallback": "SIN NOMBRE"
+  }
+}

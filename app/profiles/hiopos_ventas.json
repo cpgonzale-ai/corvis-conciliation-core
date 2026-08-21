@@ -1,0 +1,33 @@
+{
+  "profile_id": "hiopos_ventas",
+  "name": "Hiopos POS — Libro Ventas",
+  "description": "Perfil de mapeo declarativo para reportes de Libro de Ventas de Hiopos (La Cabrera, 100M, etc.)",
+  "header_row_index": 0,
+  "data_start_row": 1,
+  "sheet_index": 1,
+  "column_mappings": [
+    {"source_col": 1, "target_field": "tipo_documento", "type": "string"},
+    {"source_col": 2, "target_field": "serie", "type": "string"},
+    {"source_col": 3, "target_field": "numero_comprobante", "type": "invoice_number"},
+    {"source_col": 5, "target_field": "fecha", "type": "date"},
+    {"source_col": 8, "target_field": "nombre_cliente", "type": "string"},
+    {"source_col": 9, "target_field": "ruc", "type": "string"},
+    {"source_col": 11, "target_field": "gravada_bruta", "type": "numeric"},
+    {"source_col": 12, "target_field": "iva_bruta", "type": "numeric"},
+    {"source_col": 13, "target_field": "total", "type": "numeric"}
+  ],
+  "filter_rules": [
+    {"field": "serie", "operator": "not_equals", "value": "Anulación"},
+    {"field": "serie", "operator": "not_equals", "value": "Anulacion"}
+  ],
+  "tipo_documento_permitidos": [
+    "Factura venta",
+    "Factura venta simplificada",
+    "Abono factura venta",
+    "Abono factura venta simplificada"
+  ],
+  "defaults": {
+    "ruc_null_fallback": "X",
+    "nombre_null_fallback": "SIN NOMBRE"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "profile_id": "aloha",
+  "name": "Aloha POS — Juan Valdez",
+  "description": "Perfil de mapeo declarativo para reportes de ventas del sistema Aloha (Juan Valdez)",
+  "header_row_index": 8,
+  "data_start_row": 9,
+  "sheet_index": 1,
+  "section_marker_col": 1,
+  "section_credit_marker": "NOTA DE CREDITO",
+  "section_factura_marker": "FACTURA",
+  "column_mappings": [
+    {"source_col": 0, "target_field": "numero_comprobante", "type": "invoice_number"},
+    {"source_col": 1, "target_field": "fecha", "type": "date"},
+    {"source_col": 2, "target_field": "ruc", "type": "string"},
+    {"source_col": 3, "target_field": "nombre_cliente", "type": "string"},
+    {"source_col": 5, "target_field": "gravada_bruta", "type": "numeric"},
+    {"source_col": 6, "target_field": "iva_bruta", "type": "numeric"},
+    {"source_col": 7, "target_field": "total", "type": "numeric"},
+    {"source_col": 8, "target_field": "estado", "type": "string"}
+  ],
+  "filter_rules": [
+    {"field": "numero_comprobante", "operator": "not_empty"}
+  ],
+  "defaults": {
+    "ruc_null_fallback": "X",
+    "nombre_null_fallback": "SIN NOMBRE"
+  }
+}
