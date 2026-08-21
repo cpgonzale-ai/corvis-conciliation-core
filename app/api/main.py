@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.api.auth import router as auth_router
+from app.api.locales import router as locales_router
+from app.api.roles import router as roles_router
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90
@@ -37,6 +39,8 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(locales_router)
+app.include_router(roles_router)
 
 
 def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, lote_id: Optional[int] = None, detalle: Optional[dict] = None):

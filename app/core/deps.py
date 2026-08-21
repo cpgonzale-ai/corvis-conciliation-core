@@ -1,4 +1,4 @@
-"""Dependencias de FastAPI: sesión de DB y usuario autenticado."""
+"""Dependencias de FastAPI: sesión de DB, usuario autenticado y permisos dinámicos."""
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.database import get_db
-from app.db.models import Usuario
+from app.db.models import Permiso, Rol, Usuario
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -42,3 +42,30 @@ def require_admin(usuario: Usuario = Depends(get_current_user)) -> Usuario:
             detail="Se requiere rol de administrador",
         )
     return usuario
+
+
+def require_permission(clave: str):
+    """Genera una dependencia que exige que el rol del usuario tenga asignado el permiso
+    `clave` (ej. 'pantalla:locales', 'boton:locales.eliminar') en la tabla rol_permisos.
+
+    El rol 'admin' siempre pasa, sin importar lo que tenga cargado en rol_permisos — es la
+    válvula de seguridad para que un admin nunca pueda quedar bloqueado de la propia
+    pantalla de roles por una mala edición de permisos (por eso 'admin' y 'operador' están
+    protegidos de borrado/renombre en el router de roles: son roles de sistema)."""
+
+    def _dependency(usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)) -> Usuario:
+        if usuario.rol == "admin":
+            return usuario
+        if usuario.rol_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tenés permiso para esta acción.")
+        tiene_permiso = (
+            db.query(Permiso)
+            .join(Permiso.roles)
+            .filter(Rol.id == usuario.rol_id, Permiso.clave == clave)
+            .first()
+        )
+        if not tiene_permiso:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tenés permiso para esta acción.")
+        return usuario
+
+    return _dependency
