@@ -25,11 +25,11 @@ def get_current_user(
     except ValueError as exc:
         raise credentials_error from exc
 
-    email = payload.get("sub")
-    if not email:
+    nro_documento = payload.get("sub")
+    if not nro_documento:
         raise credentials_error
 
-    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+    usuario = db.query(Usuario).filter(Usuario.nro_documento == nro_documento).first()
     if usuario is None or not usuario.activo:
         raise credentials_error
     return usuario

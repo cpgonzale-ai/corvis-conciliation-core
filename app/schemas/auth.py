@@ -23,6 +23,7 @@ class TokenResponse(BaseModel):
 
 class UsuarioCreate(BaseModel):
     nombre: str = Field(min_length=1, max_length=150)
+    nro_documento: str = Field(min_length=1, max_length=20)
     email: EmailStr
     password: str = Field(min_length=8)
     rol_id: int
@@ -33,6 +34,7 @@ class UsuarioCreate(BaseModel):
 
 class UsuarioUpdate(BaseModel):
     nombre: str | None = Field(default=None, min_length=1, max_length=150)
+    nro_documento: str | None = Field(default=None, min_length=1, max_length=20)
     rol_id: int | None = None
     activo: bool | None = None
     password: str | None = Field(default=None, min_length=8)
@@ -48,6 +50,7 @@ class UsuarioUpdate(BaseModel):
 class UsuarioOut(BaseModel):
     id: int
     nombre: str
+    nro_documento: str
     email: EmailStr
     rol: str
     rol_id: int | None

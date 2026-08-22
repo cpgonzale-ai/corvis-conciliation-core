@@ -26,11 +26,13 @@ def _log_evento(db: Session, usuario_id: int, accion: str, request: Request | No
 
 @router.post("/login", response_model=TokenResponse)
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
+    # El usuario para loguearse es el número de documento (CU-01), no el email — el campo
+    # se sigue llamando "username" porque así lo pide el formato estándar OAuth2 del form.
+    usuario = db.query(Usuario).filter(Usuario.nro_documento == form_data.username.strip()).first()
     if not usuario or not usuario.activo or not verify_password(form_data.password, usuario.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
 
-    token = create_access_token(subject=usuario.email, rol=usuario.rol)
+    token = create_access_token(subject=usuario.nro_documento, rol=usuario.rol)
     _log_evento(db, usuario.id, "login", request)
     return TokenResponse(access_token=token, rol=usuario.rol)
 
@@ -58,6 +60,8 @@ def crear_usuario(
 ):
     if db.query(Usuario).filter(Usuario.email == datos.email).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El email ya está registrado")
+    if db.query(Usuario).filter(Usuario.nro_documento == datos.nro_documento).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese número de documento ya está registrado")
 
     rol = db.get(Rol, datos.rol_id)
     if not rol:
@@ -65,6 +69,7 @@ def crear_usuario(
 
     nuevo = Usuario(
         nombre=datos.nombre,
+        nro_documento=datos.nro_documento,
         email=datos.email,
         password_hash=hash_password(datos.password),
         rol=rol.nombre,
@@ -74,7 +79,7 @@ def crear_usuario(
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
-    _log_evento(db, admin.id, "alta_usuario", request, detalle={"usuario_id": nuevo.id, "usuario_creado": nuevo.email, "rol": rol.nombre})
+    _log_evento(db, admin.id, "alta_usuario", request, detalle={"usuario_id": nuevo.id, "usuario_creado": nuevo.nro_documento, "rol": rol.nombre})
     return nuevo
 
 
@@ -95,6 +100,10 @@ def editar_usuario(
     if not objetivo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
+    if datos.nro_documento is not None and datos.nro_documento != objetivo.nro_documento:
+        if db.query(Usuario).filter(Usuario.nro_documento == datos.nro_documento, Usuario.id != usuario_id).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese número de documento ya está registrado")
+        objetivo.nro_documento = datos.nro_documento
     if datos.nombre is not None:
         objetivo.nombre = datos.nombre
     if datos.activo is not None:

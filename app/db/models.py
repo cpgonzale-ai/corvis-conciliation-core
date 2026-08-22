@@ -33,6 +33,9 @@ class Usuario(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     nombre: Mapped[str] = mapped_column(String(150), nullable=False)
+    # Nombre de usuario para el login (ver docs/analisis_funcional.md CU-01) — ya no el
+    # email, que se mantiene solo como dato de contacto.
+    nro_documento: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     # Se mantiene como string (además de rol_id) para no romper el JWT ni el resto del
