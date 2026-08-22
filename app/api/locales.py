@@ -25,6 +25,33 @@ def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, det
     db.commit()
 
 
+def _validar_unicidad(db: Session, punto_expedicion: str | None, codigo: str | None, excluir_id: int | None = None):
+    """punto_expedicion y código no pueden repetirse entre locales (dos locales con el
+    mismo punto de expedición harían ambigua la resolución automática del local en el Paso
+    2). código sí puede quedar vacío en varios locales — solo se valida cuando viene con
+    valor."""
+    if punto_expedicion:
+        q = db.query(Local).filter(Local.punto_expedicion == punto_expedicion)
+        if excluir_id is not None:
+            q = q.filter(Local.id != excluir_id)
+        existente = q.first()
+        if existente:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"El punto de expedición \"{punto_expedicion}\" ya está asignado al local \"{existente.nombre}\".",
+            )
+    if codigo:
+        q = db.query(Local).filter(Local.codigo == codigo)
+        if excluir_id is not None:
+            q = q.filter(Local.id != excluir_id)
+        existente = q.first()
+        if existente:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"El código \"{codigo}\" ya está asignado al local \"{existente.nombre}\".",
+            )
+
+
 @router.get("", response_model=list[LocalOut])
 def listar_locales(db: Session = Depends(get_db), usuario: Usuario = Depends(get_current_user)):
     # Lectura disponible para cualquier usuario autenticado: el Paso 2 la necesita para
@@ -39,6 +66,7 @@ def crear_local(
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(require_permission("boton:locales.crear")),
 ):
+    _validar_unicidad(db, datos.punto_expedicion, datos.codigo)
     nuevo = Local(**datos.model_dump())
     db.add(nuevo)
     db.commit()
@@ -58,7 +86,14 @@ def editar_local(
     local = db.get(Local, local_id)
     if not local:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Local no encontrado")
-    for campo, valor in datos.model_dump(exclude_unset=True).items():
+    cambios = datos.model_dump(exclude_unset=True)
+    _validar_unicidad(
+        db,
+        cambios.get("punto_expedicion", local.punto_expedicion),
+        cambios.get("codigo", local.codigo),
+        excluir_id=local.id,
+    )
+    for campo, valor in cambios.items():
         setattr(local, campo, valor)
     db.commit()
     db.refresh(local)

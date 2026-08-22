@@ -72,7 +72,7 @@ def crear_usuario(
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
-    _log_evento(db, admin.id, "alta_usuario", request, detalle={"usuario_creado": nuevo.email, "rol": rol.nombre})
+    _log_evento(db, admin.id, "alta_usuario", request, detalle={"usuario_id": nuevo.id, "usuario_creado": nuevo.email, "rol": rol.nombre})
     return nuevo
 
 

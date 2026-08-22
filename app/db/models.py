@@ -88,8 +88,8 @@ class Local(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     nombre: Mapped[str] = mapped_column(String(150), nullable=False)
-    punto_expedicion: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
-    codigo: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    punto_expedicion: Mapped[str] = mapped_column(String(10), nullable=False, unique=True, index=True)
+    codigo: Mapped[str | None] = mapped_column(String(30), nullable=True, unique=True)
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="activo")  # activo | inactivo
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
