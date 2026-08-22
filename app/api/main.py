@@ -3,6 +3,7 @@ FastAPI REST API Service for SISCOM RG90 Core.
 Provides endpoints for profile management, file ingestion, sequence gap detection, and RG90 reconciliation.
 """
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -79,6 +80,7 @@ async def ingest_files(
     profile_id = "aloha" if "aloha" in system_key.lower() else ("hiopos_ventas" if "hiopos" in system_key.lower() else "universal")
     all_rows = []
     all_cortes = []
+    loop = asyncio.get_event_loop()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for file in files:
@@ -88,7 +90,12 @@ async def ingest_files(
                 shutil.copyfileobj(file.file, buffer)
 
             try:
-                rows, cortes = engine.ingest_file(tmp_path, profile_id, local_name)
+                # engine.ingest_file (pandas/xlrd) es trabajo sincrónico y puede tardar
+                # varios segundos por archivo — se corre en un thread aparte para no
+                # bloquear el event loop mientras se procesa un lote con varios reportes
+                # (si no, el backend queda "colgado" para cualquier otro pedido, incluidos
+                # los health checks, hasta terminar todo el lote).
+                rows, cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, profile_id, local_name)
             except ValueError as e:
                 # El archivo no corresponde al sistema elegido (firma no encontrada) — se
                 # bloquea acá, antes de crear ningún lote, para que el Paso 1 no avance.
@@ -145,12 +152,13 @@ async def reconcile(
     pos_rows = json.loads(pos_data_json)
 
     rg90_rows = []
+    loop = asyncio.get_event_loop()
     with tempfile.TemporaryDirectory() as tmp_dir:
         for rg90_file in rg90_files:
             tmp_path = os.path.join(tmp_dir, rg90_file.filename)
             with open(tmp_path, "wb") as buffer:
                 shutil.copyfileobj(rg90_file.file, buffer)
-            rg90_file_rows, _rg90_cortes = engine.ingest_file(tmp_path, "rg90_set", "RG90 SET")
+            rg90_file_rows, _rg90_cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "rg90_set", "RG90 SET")
             rg90_rows.extend(rg90_file_rows)
 
     diffs = reconcile_with_rg90(pos_rows, rg90_rows)
