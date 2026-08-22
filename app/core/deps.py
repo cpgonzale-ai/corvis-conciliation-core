@@ -61,7 +61,7 @@ def require_permission(clave: str):
         tiene_permiso = (
             db.query(Permiso)
             .join(Permiso.roles)
-            .filter(Rol.id == usuario.rol_id, Permiso.clave == clave)
+            .filter(Rol.id == usuario.rol_id, Rol.estado == "activo", Permiso.clave == clave)
             .first()
         )
         if not tiene_permiso:

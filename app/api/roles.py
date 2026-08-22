@@ -29,7 +29,7 @@ def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, det
 def _rol_out(rol: Rol) -> RolOut:
     return RolOut(
         id=rol.id, nombre=rol.nombre, descripcion=rol.descripcion, es_sistema=rol.es_sistema,
-        permisos=[p.clave for p in rol.permisos],
+        estado=rol.estado, permisos=[p.clave for p in rol.permisos],
     )
 
 
@@ -59,7 +59,7 @@ def crear_rol(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe un rol con ese nombre")
 
     permisos = db.query(Permiso).filter(Permiso.clave.in_(datos.permisos)).all() if datos.permisos else []
-    nuevo = Rol(nombre=datos.nombre, descripcion=datos.descripcion, es_sistema=False, permisos=permisos)
+    nuevo = Rol(nombre=datos.nombre, descripcion=datos.descripcion, es_sistema=False, estado=datos.estado, permisos=permisos)
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
@@ -81,11 +81,15 @@ def editar_rol(
 
     if rol.es_sistema and datos.nombre is not None and datos.nombre != rol.nombre:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede renombrar un rol de sistema (admin/operador)")
+    if rol.es_sistema and datos.estado == "inactivo":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede desactivar un rol de sistema (admin/operador)")
 
     if datos.nombre is not None:
         rol.nombre = datos.nombre
     if datos.descripcion is not None:
         rol.descripcion = datos.descripcion
+    if datos.estado is not None:
+        rol.estado = datos.estado
     if datos.permisos is not None:
         rol.permisos = db.query(Permiso).filter(Permiso.clave.in_(datos.permisos)).all()
 

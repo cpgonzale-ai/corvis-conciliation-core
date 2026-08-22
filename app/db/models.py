@@ -58,6 +58,7 @@ class Rol(Base):
     nombre: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     descripcion: Mapped[str | None] = mapped_column(String(255), nullable=True)
     es_sistema: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    estado: Mapped[str] = mapped_column(String(10), nullable=False, default="activo")  # activo | inactivo
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     usuarios: Mapped[list["Usuario"]] = relationship(back_populates="rol_obj")

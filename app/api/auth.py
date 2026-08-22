@@ -44,7 +44,8 @@ def me(db: Session = Depends(get_db), usuario: Usuario = Depends(get_current_use
         from app.db.models import Permiso
         permisos = [p.clave for p in db.query(Permiso).all()]
     else:
-        permisos = [p.clave for p in usuario.rol_obj.permisos] if usuario.rol_obj else []
+        # Un rol inactivo no habilita ningún permiso (mismo criterio que require_permission).
+        permisos = [p.clave for p in usuario.rol_obj.permisos] if usuario.rol_obj and usuario.rol_obj.estado == "activo" else []
     return MeOut(**UsuarioOut.model_validate(usuario).model_dump(), permisos=permisos)
 
 
@@ -68,6 +69,7 @@ def crear_usuario(
         password_hash=hash_password(datos.password),
         rol=rol.nombre,
         rol_id=rol.id,
+        activo=datos.activo,
     )
     db.add(nuevo)
     db.commit()
