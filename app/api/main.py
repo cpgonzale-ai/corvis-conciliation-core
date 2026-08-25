@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auditoria import router as auditoria_router
 from app.api.auth import router as auth_router
+from app.api.compras import router as compras_router
 from app.api.locales import router as locales_router
 from app.api.roles import router as roles_router
 from app.core.config import settings
@@ -25,6 +26,14 @@ from app.db.models import ArchivoProcesado, EventoAuditoria, LoteProcesamiento, 
 
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "profiles")
 engine = IngestionEngine(PROFILES_DIR)
+
+# Starlette limita a 1MB cada "parte" de un multipart/form-data por defecto — incluidos los
+# campos de texto, no solo los archivos. pos_data_json (el libro propio, serializado para
+# mandarlo a /reconcile) supera ese límite con libros de varios miles de comprobantes (ej.
+# 6.246 filas de compras ya pesan ~4MB como JSON; un libro de ventas grande, bastante más).
+# Se sube el límite acá en vez de declarar pos_data_json como Form(...) directo, porque
+# FastAPI no expone ese parámetro a través del descriptor Form().
+FORM_MAX_PART_SIZE = 80 * 1024 * 1024
 
 app = FastAPI(
     title="SISCOM RG90 Core API",
@@ -41,6 +50,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(compras_router)
 app.include_router(locales_router)
 app.include_router(roles_router)
 app.include_router(auditoria_router)
@@ -139,9 +149,6 @@ async def ingest_files(
 @app.post("/api/reconcile")
 async def reconcile(
     request: Request,
-    rg90_files: List[UploadFile] = File(...),
-    pos_data_json: str = Form(...),
-    lote_id: Optional[int] = Form(None),
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(get_current_user),
 ):
@@ -149,6 +156,13 @@ async def reconcile(
     nota de crédito), que se consolidan antes de comparar — ver Minuta 3: la RG90 se
     descarga en reportes separados por tipo de comprobante."""
     import json
+    form = await request.form(max_part_size=FORM_MAX_PART_SIZE)
+    rg90_files = form.getlist("rg90_files")
+    pos_data_json = form.get("pos_data_json")
+    if not rg90_files or pos_data_json is None:
+        raise HTTPException(status_code=422, detail="Faltan los archivos de RG90 o el libro a comparar.")
+    lote_id_raw = form.get("lote_id")
+    lote_id = int(lote_id_raw) if lote_id_raw else None
     pos_rows = json.loads(pos_data_json)
 
     rg90_rows = []

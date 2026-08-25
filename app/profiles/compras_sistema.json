@@ -1,0 +1,24 @@
+{
+  "profile_id": "compras_sistema",
+  "name": "Libro de Compras — Sistema",
+  "header_row_index": 0,
+  "sheet_index": 0,
+  "signature_columns": ["documentonro", "provruc", "tipocomprabante"],
+  "column_mappings": [
+    {"source_name": "fec", "target_field": "fecha"},
+    {"source_name": "documentonro", "target_field": "documento"},
+    {"source_name": "provruc", "target_field": "ruc_proveedor_raw"},
+    {"source_name": "provrazonsocial", "target_field": "proveedor"},
+    {"source_name": "tipocomprabante", "target_field": "tipo_comprobante"},
+    {"source_name": "control", "target_field": "control"},
+    {"source_name": "fp", "target_field": "condicion"},
+    {"source_name": "nrotim", "target_field": "timbrado"},
+    {"source_name": "sucursal", "target_field": "codigo_sucursal"},
+    {"source_name": "valorgrav10", "target_field": "gravada_10"},
+    {"source_name": "iva10", "target_field": "iva_10"},
+    {"source_name": "valorgrav5", "target_field": "gravada_5"},
+    {"source_name": "iva5", "target_field": "iva_5"},
+    {"source_name": "exentas", "target_field": "exenta"},
+    {"source_name": "total", "target_field": "total"}
+  ]
+}
