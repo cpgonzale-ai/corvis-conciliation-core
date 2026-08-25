@@ -161,6 +161,10 @@ async def reconcile_compras(
         "success": True,
         "lote_id": lote.id,
         "rg_total_rows": len(rg_rows),
+        # Filas de la RG ya parseadas — el frontend las lista en el paso 2 (igual que el
+        # libro propio en el paso 1), para poder consultar ambos lados antes de ver el
+        # resultado de la comparación en el paso 3.
+        "rg_rows": rg_rows,
         "diffs": diffs,
         "summary": {
             "coinciden": coinciden,
