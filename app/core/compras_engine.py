@@ -192,8 +192,8 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                 "proveedor": pos_rec["proveedor"],
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": pos_rec["total"],
-                "rg": "—",
+                "libro": _lado_diff(pos_rec),
+                "rg": _lado_diff(None),
                 "diferencia": "No llegó a la interfaz",
             })
         elif rg_rec and not pos_rec:
@@ -202,8 +202,8 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                 "proveedor": rg_rec["proveedor"],
                 "sistema": rg_rec.get("sistema", "RG"),
                 "local": rg_rec.get("local", "Desconocido"),
-                "libro": "—",
-                "rg": rg_rec["total"],
+                "libro": _lado_diff(None),
+                "rg": _lado_diff(rg_rec),
                 "diferencia": "No en libro propio",
             })
         elif pos_rec and rg_rec:
@@ -221,10 +221,26 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                     "proveedor": pos_rec["proveedor"],
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
-                    "libro": pos_rec["total"],
-                    "rg": rg_rec["total"],
+                    "libro": _lado_diff(pos_rec),
+                    "rg": _lado_diff(rg_rec),
                     "diferencia": "Diferencia de monto",
                     "diferencias_detalle": campo_diffs,
                 })
 
     return diffs
+
+
+def _lado_diff(rec: Dict[str, Any] | None) -> Dict[str, str]:
+    """Arma el desglose (gravada 10%/5%, IVA 10%/5%, exenta, total) de un lado de la
+    comparación (libro propio o RG) tal como lo pide el Paso 3 — vacío ('—') cuando ese
+    lado no tiene el comprobante."""
+    if rec is None:
+        return {"gravada_10": "—", "iva_10": "—", "gravada_5": "—", "iva_5": "—", "exenta": "—", "total": "—"}
+    return {
+        "gravada_10": rec["gravadas"],
+        "iva_10": rec["iva"],
+        "gravada_5": rec["gravadas_5"],
+        "iva_5": rec["iva_5"],
+        "exenta": rec["exentas"],
+        "total": rec["total"],
+    }
