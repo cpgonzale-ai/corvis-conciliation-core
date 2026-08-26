@@ -35,6 +35,17 @@ engine = IngestionEngine(PROFILES_DIR)
 # FastAPI no expone ese parámetro a través del descriptor Form().
 FORM_MAX_PART_SIZE = 80 * 1024 * 1024
 
+# Auto-detección del sistema de ventas en /api/ingest: el Paso 1 del frontend ya no pide
+# elegir el sistema antes de adjuntar (mismo criterio que /api/compras/ingest, que nunca lo
+# pidió) — se prueba cada perfil, en este orden, hasta encontrar el que matchea la firma de
+# columnas del archivo.
+PERFILES_VENTAS_AUTO = ["aloha", "hiopos_ventas", "universal"]
+PERFIL_VENTAS_LABEL = {"aloha": "Aloha", "hiopos_ventas": "Hiopos", "universal": "Universal"}
+# El frontend (SYSTEMS_META) usa "hiopos" como key, no "hiopos_ventas" (ese es el profile_id
+# interno del motor) — se traduce acá, en el borde de la API, para no tener que sincronizar
+# ese nombre en dos lugares.
+PERFIL_VENTAS_FRONTEND_KEY = {"aloha": "aloha", "hiopos_ventas": "hiopos", "universal": "universal"}
+
 app = FastAPI(
     title="SISCOM RG90 Core API",
     description="Motor de Ingesta, Conciliación y Reglas Fiscales para Libros de Venta vs RG90 (SET Paraguay)",
@@ -81,45 +92,81 @@ def get_profiles(usuario: Usuario = Depends(get_current_user)):
 async def ingest_files(
     request: Request,
     files: List[UploadFile] = File(...),
-    system_key: str = Form(...),
+    system_key: str = Form("auto"),
     local_name: Optional[str] = Form("Local General"),
     tipo_libro: str = Form("venta"),
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(get_current_user),
 ):
-    profile_id = "aloha" if "aloha" in system_key.lower() else ("hiopos_ventas" if "hiopos" in system_key.lower() else "universal")
+    # "auto" (el Paso 1 ya no tiene selector): se prueba cada perfil de venta conocido, por
+    # archivo, hasta encontrar el que matchea. Un system_key explícito (aloha/hiopos/
+    # universal) se sigue aceptando por compatibilidad, pero el frontend actual ya no lo
+    # manda.
+    auto_detectar = system_key.lower() == "auto"
+    profile_id_fijo = None
+    if not auto_detectar:
+        profile_id_fijo = "aloha" if "aloha" in system_key.lower() else ("hiopos_ventas" if "hiopos" in system_key.lower() else "universal")
+
     all_rows = []
     all_cortes = []
+    perfil_por_archivo: dict = {}
     loop = asyncio.get_event_loop()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for file in files:
-            ext = os.path.splitext(file.filename)[1].lower()
             tmp_path = os.path.join(tmp_dir, file.filename)
             with open(tmp_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
-            try:
-                # engine.ingest_file (pandas/xlrd) es trabajo sincrónico y puede tardar
-                # varios segundos por archivo — se corre en un thread aparte para no
-                # bloquear el event loop mientras se procesa un lote con varios reportes
-                # (si no, el backend queda "colgado" para cualquier otro pedido, incluidos
-                # los health checks, hasta terminar todo el lote).
-                rows, cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, profile_id, local_name)
-            except ValueError as e:
-                # El archivo no corresponde al sistema elegido (firma no encontrada) — se
-                # bloquea acá, antes de crear ningún lote, para que el Paso 1 no avance.
-                raise HTTPException(status_code=422, detail=str(e))
+            # engine.ingest_file (pandas/xlrd) es trabajo sincrónico y puede tardar varios
+            # segundos por archivo — se corre en un thread aparte para no bloquear el event
+            # loop mientras se procesa un lote con varios reportes (si no, el backend queda
+            # "colgado" para cualquier otro pedido, incluidos los health checks, hasta
+            # terminar todo el lote).
+            if auto_detectar:
+                rows = cortes = None
+                profile_id = None
+                errores = []
+                for candidato in PERFILES_VENTAS_AUTO:
+                    try:
+                        rows, cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, candidato, local_name)
+                        profile_id = candidato
+                        break
+                    except ValueError as e:
+                        errores.append(f"{PERFIL_VENTAS_LABEL.get(candidato, candidato)}: {e}")
+                if profile_id is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"El archivo '{file.filename}' no coincide con ningún formato de ventas conocido "
+                            f"(Aloha, Hiopos, Universal). {' | '.join(errores)}"
+                        ),
+                    )
+            else:
+                profile_id = profile_id_fijo
+                try:
+                    rows, cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, profile_id, local_name)
+                except ValueError as e:
+                    # El archivo no corresponde al sistema elegido (firma no encontrada) —
+                    # se bloquea acá, antes de crear ningún lote, para que el Paso 1 no avance.
+                    raise HTTPException(status_code=422, detail=str(e))
+
+            perfil_por_archivo[file.filename] = profile_id
             all_rows.extend(rows)
             for c in cortes:
                 all_cortes.append({**c, "archivo": file.filename, "local": local_name})
 
     gaps = detect_sequence_gaps(all_rows)
 
+    # "mixto" (ver el comentario del campo en models.py) cuando el lote combina archivos de
+    # más de un sistema — posible ahora que ya no hace falta agruparlos de antemano.
+    perfiles_distintos = set(perfil_por_archivo.values())
+    sistema_origen = next(iter(perfiles_distintos)) if len(perfiles_distintos) == 1 else "mixto"
+
     lote = LoteProcesamiento(
         usuario_id=usuario.id,
         tipo_libro=tipo_libro,
-        sistema_origen=system_key,
+        sistema_origen=sistema_origen,
         cantidad_comprobantes=len(all_rows),
         cantidad_saltos=len(gaps),
         estado="cargado",
@@ -128,11 +175,11 @@ async def ingest_files(
     db.flush()  # obtiene lote.id sin cerrar la transacción
 
     for file in files:
-        db.add(ArchivoProcesado(lote_id=lote.id, nombre_archivo=file.filename, perfil=profile_id))
+        db.add(ArchivoProcesado(lote_id=lote.id, nombre_archivo=file.filename, perfil=perfil_por_archivo.get(file.filename, "")))
     db.commit()
     db.refresh(lote)
 
-    _log_evento(db, usuario.id, "carga_archivo", request, lote_id=lote.id, detalle={"archivos": [f.filename for f in files], "sistema": system_key})
+    _log_evento(db, usuario.id, "carga_archivo", request, lote_id=lote.id, detalle={"archivos": [f.filename for f in files], "sistema": sistema_origen})
     _log_evento(db, usuario.id, "conversion", request, lote_id=lote.id, detalle={"cantidad_comprobantes": len(all_rows), "cantidad_saltos": len(gaps)})
 
     return {
@@ -142,7 +189,17 @@ async def ingest_files(
         "gaps_count": len(gaps),
         "rows": all_rows,
         "gaps": gaps,
-        "cortes": all_cortes
+        "cortes": all_cortes,
+        # Para que el Paso 1 pueda mostrar, por archivo adjuntado, qué sistema se detectó
+        # (campo de solo lectura, se completa solo después de analizar).
+        "archivos_detectados": [
+            {
+                "archivo": fn,
+                "sistema_key": PERFIL_VENTAS_FRONTEND_KEY.get(pid, pid),
+                "sistema_label": PERFIL_VENTAS_LABEL.get(pid, pid),
+            }
+            for fn, pid in perfil_por_archivo.items()
+        ],
     }
 
 
