@@ -50,22 +50,36 @@ async def ingest_compras(
 ):
     all_rows = []
     loop = asyncio.get_event_loop()
+    profile_usado = "compras_sistema"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for file in files:
             tmp_path = os.path.join(tmp_dir, file.filename)
             with open(tmp_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
+            # Auto-detección de formato: primero se intenta el export del sistema
+            # habitual (compras_sistema); si la firma de columnas no coincide, se
+            # reintenta con el Formato Universal (Minuta) antes de fallar.
             try:
                 rows = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "compras_sistema", local_name)
-            except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e))
+            except ValueError as e_sistema:
+                try:
+                    rows = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "compras_universal", local_name)
+                    profile_usado = "compras_universal"
+                except ValueError as e_universal:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"El archivo '{file.filename}' no coincide con ningún formato de compras conocido. "
+                            f"Sistema: {e_sistema} | Universal: {e_universal}"
+                        ),
+                    )
             all_rows.extend(rows)
 
     lote = LoteProcesamiento(
         usuario_id=usuario.id,
         tipo_libro="compra",
-        sistema_origen="compras_sistema",
+        sistema_origen=profile_usado,
         cantidad_comprobantes=len(all_rows),
         cantidad_saltos=0,
         estado="cargado",
@@ -74,11 +88,11 @@ async def ingest_compras(
     db.flush()
 
     for file in files:
-        db.add(ArchivoProcesado(lote_id=lote.id, nombre_archivo=file.filename, perfil="compras_sistema"))
+        db.add(ArchivoProcesado(lote_id=lote.id, nombre_archivo=file.filename, perfil=profile_usado))
     db.commit()
     db.refresh(lote)
 
-    _log_evento(db, usuario.id, "carga_archivo", request, lote_id=lote.id, detalle={"archivos": [f.filename for f in files], "sistema": "compras_sistema"})
+    _log_evento(db, usuario.id, "carga_archivo", request, lote_id=lote.id, detalle={"archivos": [f.filename for f in files], "sistema": profile_usado})
     _log_evento(db, usuario.id, "conversion", request, lote_id=lote.id, detalle={"cantidad_comprobantes": len(all_rows)})
 
     return {

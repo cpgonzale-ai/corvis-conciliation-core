@@ -66,6 +66,18 @@ def _fmt(n: float) -> str:
     return s.replace(",", "§").replace(".", ",").replace("§", ".")
 
 
+def _texto_identificador(val: Any) -> str:
+    """Timbrado/control son identificadores, no importes — pero si la columna de origen no
+    tiene ningún valor no numérico, pandas la lee como float y un timbrado como 14353713
+    llega acá como 14353713.0. Se saca el '.0' final en vez de arrastrarlo al libro limpio."""
+    s = str(val).strip() if val is not None else ""
+    if not s or s.lower() in ["nan", "none", "null"]:
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
 class ComprasEngine:
     def __init__(self, profiles_dir: str):
         self.profiles_dir = profiles_dir
@@ -99,6 +111,21 @@ class ComprasEngine:
                     f"El archivo no parece corresponder al formato de {profile['name']}. "
                     f"Verificá que adjuntaste el archivo correcto."
                 )
+
+            # El Formato Universal (Minuta 5) trae en el MISMO archivo una hoja de ventas y
+            # otra de compras con columnas idénticas — si no aparece la hoja exacta que pide
+            # el perfil, se corta acá en vez de caer en sheet_index por default: leer la
+            # hoja equivocada sería indistinguible a simple vista (misma estructura).
+            prefer_name = str(profile.get("prefer_sheet_name", "")).strip().lower()
+            if prefer_name:
+                encontrada = next((i for i, name in enumerate(sheet_names) if str(name).strip().lower() == prefer_name), None)
+                if encontrada is None:
+                    raise ValueError(
+                        f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
+                        f"verificá que sea el archivo correcto para {profile['name']}."
+                    )
+                sheet_index = encontrada
+
             df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index)
 
         df.columns = [str(c).strip() for c in df.columns]
@@ -113,8 +140,22 @@ class ComprasEngine:
             extracted[target] = df[name] if name in df.columns else pd.Series([None] * len(df))
         records_df = pd.DataFrame(extracted)
 
+        tipos_permitidos = profile.get("tipo_comprobante_permitidos")
+        permitidos_lower = {t.lower() for t in tipos_permitidos} if tipos_permitidos is not None else None
+
         rows: List[Dict[str, Any]] = []
         for _, r in records_df.iterrows():
+            tipo_comprobante = fix_mojibake(str(r.get("tipo_comprobante") or "").strip())
+
+            # Filtro explícito por tipo de comprobante (ej. Formato Universal, que además de
+            # Factura/Nota de Crédito puede traer filas de "Despacho" u otros documentos no
+            # fiscales que no deben entrar al libro de compras). Sin esta lista, un
+            # comprobante con un número interno no fiscal (ej. "25030IC0400716") puede
+            # terminar armando un doc EEE-PPP-NNNNNNN inventado que sí pasa la validación de
+            # formato — se corta antes, por tipo, no solo por si el número calza.
+            if permitidos_lower is not None and tipo_comprobante.lower() not in permitidos_lower:
+                continue
+
             doc = normalize_invoice_number(r.get("documento"))
             if not doc or not DOC_PATTERN.match(doc):
                 continue
@@ -124,7 +165,6 @@ class ComprasEngine:
                 continue
             clave = f"{doc}{ruc}"
 
-            tipo_comprobante = fix_mojibake(str(r.get("tipo_comprobante") or "").strip())
             es_credito = tipo_comprobante.upper() in _MARCADORES_NC
             signo = -1 if es_credito else 1
 
@@ -150,8 +190,8 @@ class ComprasEngine:
                 "tipo_comprobante": tipo_comprobante or ("NOTA DE CRÉDITO" if es_credito else "FACTURA"),
                 "tipo_doc": "Nota de Crédito" if es_credito else "Factura",
                 "condicion": str(r.get("condicion") or "").strip(),
-                "timbrado": str(r.get("timbrado") or "").strip(),
-                "control": str(r.get("control") or "").strip(),
+                "timbrado": _texto_identificador(r.get("timbrado")),
+                "control": _texto_identificador(r.get("control")),
                 "gravadas": _fmt(gravada_10),
                 "iva": _fmt(iva_10),
                 "gravadas_5": _fmt(gravada_5),

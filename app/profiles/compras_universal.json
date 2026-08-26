@@ -1,0 +1,25 @@
+{
+  "profile_id": "compras_universal",
+  "name": "Formato Universal — Libro de Compras",
+  "description": "Planilla estándar (Minuta) para el libro de compras cuando no se exporta desde el sistema habitual — mismo layout que el Formato Universal de ventas, hoja de Compras del mismo archivo.",
+  "header_row_index": 7,
+  "sheet_index": 1,
+  "prefer_sheet_name": "Formato Universal -LIBRO COMPRA",
+  "signature_columns": ["FECHA", "TIPO", "N° DOCUMENTO", "R. SOCIAL/APELLIDO/NOMBRE", "RUC", "GRAV 10%", "CONDICION"],
+  "tipo_comprobante_permitidos": ["FACTURA", "NOTA DE CREDITO"],
+  "column_mappings": [
+    {"source_name": "FECHA", "target_field": "fecha"},
+    {"source_name": "TIPO", "target_field": "tipo_comprobante"},
+    {"source_name": "N° DOCUMENTO", "target_field": "documento"},
+    {"source_name": "R. SOCIAL/APELLIDO/NOMBRE", "target_field": "proveedor"},
+    {"source_name": "RUC", "target_field": "ruc_proveedor_raw"},
+    {"source_name": "GRAV 10%", "target_field": "gravada_10"},
+    {"source_name": "IVA 10%", "target_field": "iva_10"},
+    {"source_name": "GRAV 5%", "target_field": "gravada_5"},
+    {"source_name": "IVA 5%", "target_field": "iva_5"},
+    {"source_name": "EXENTAS", "target_field": "exenta"},
+    {"source_name": "TOTAL", "target_field": "total"},
+    {"source_name": "TIMBRADO", "target_field": "timbrado"},
+    {"source_name": "CONDICION", "target_field": "condicion"}
+  ]
+}

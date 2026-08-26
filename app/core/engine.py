@@ -276,7 +276,22 @@ class IngestionEngine:
                 if str(name).strip().lower() == prefer_name:
                     candidatos.append(i)
                     break
-        candidatos += [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet and i not in candidatos]
+
+        # El Formato Universal (Minuta) trae en el MISMO archivo una hoja de ventas y otra
+        # de compras con columnas idénticas — si se cayera al fallback de abajo (probar
+        # cualquier otra hoja del archivo) y la hoja preferida no matcheara por algún typo,
+        # se podría terminar leyendo silenciosamente la hoja equivocada (compras como si
+        # fuera ventas, o viceversa) sin que salte ningún error. Perfiles con esta bandera
+        # exigen la hoja exacta: si no aparece, se corta acá, no se prueba ninguna otra.
+        if profile.get("require_exact_sheet_name") and not candidatos:
+            raise ValueError(
+                f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
+                f"verificá que sea el Formato Universal correcto para {profile['name']}."
+            )
+        if profile.get("require_exact_sheet_name"):
+            candidatos = candidatos[:1]
+        else:
+            candidatos += [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet and i not in candidatos]
 
         rows: List[Dict[str, Any]] = []
         cortes: List[Dict[str, Any]] = []
@@ -385,6 +400,18 @@ class IngestionEngine:
             if serie_norm.upper().startswith("NC"):
                 es_credito = True
                 serie_for_doc = serie_norm[2:]
+
+            # Tercera forma de detectar nota de crédito, para perfiles que no tienen ni
+            # marcador de sección (Aloha) ni prefijo "NC" en la serie (Hiopos) — el Formato
+            # Universal (Minuta) trae un campo "TIPO" por fila ("FACTURA" / "NOTA DE
+            # CREDITO") en vez de eso. El monto ya viene en negativo en el archivo de
+            # origen para estas filas, así que acá solo hace falta marcar es_credito; el
+            # signo final se recalcula igual (abs + signo) más abajo.
+            notas_credito_por_tipo = {t.upper() for t in profile.get("tipo_documento_notas_credito", [])}
+            if notas_credito_por_tipo:
+                tipo_doc_val = fix_mojibake(str(r.get("tipo_documento") or "").strip()).upper()
+                if tipo_doc_val in notas_credito_por_tipo:
+                    es_credito = True
 
             raw_doc = r.get("numero_comprobante")
             if serie_for_doc and not str(raw_doc).startswith(serie_for_doc):

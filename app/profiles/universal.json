@@ -1,25 +1,25 @@
 {
   "profile_id": "universal",
   "name": "Formato Universal — Libro de Ventas",
-  "description": "Perfil de mapeo declarativo estándar para importar libros de venta de otros sistemas POS/ERP",
-  "header_row_index": 0,
-  "data_start_row": 1,
+  "description": "Planilla estándar (Minuta) para clientes/locales que no exportan desde Aloha o Hiopos — trae los montos ya separados por tasa (10%/5%/exenta), sin necesidad de heurística de clasificación.",
+  "header_row_index": 7,
+  "sheet_index": 0,
+  "prefer_sheet_name": "Formato Universal- LIBRO VENTAS",
+  "require_exact_sheet_name": true,
+  "signature_columns": ["FECHA", "TIPO", "N° DOCUMENTO", "R. SOCIAL/APELLIDO/NOMBRE", "RUC", "GRAV 10%", "CONDICION"],
+  "tipo_documento_permitidos": ["FACTURA", "NOTA DE CREDITO"],
+  "tipo_documento_notas_credito": ["NOTA DE CREDITO"],
   "column_mappings": [
-    {"source_name": "Fecha", "target_field": "fecha", "type": "date"},
-    {"source_name": "Documento", "target_field": "numero_comprobante", "type": "invoice_number"},
-    {"source_name": "RUC", "target_field": "ruc", "type": "string"},
-    {"source_name": "Razon Social", "target_field": "nombre_cliente", "type": "string"},
-    {"source_name": "Gravadas 10%", "target_field": "gravada_10", "type": "numeric"},
-    {"source_name": "IVA 10%", "target_field": "iva_10", "type": "numeric"},
-    {"source_name": "Exentas", "target_field": "exenta", "type": "numeric"},
-    {"source_name": "Total", "target_field": "total", "type": "numeric"},
-    {"source_name": "Estado", "target_field": "estado", "type": "string"}
-  ],
-  "filter_rules": [
-    {"field": "numero_comprobante", "operator": "not_empty"}
-  ],
-  "defaults": {
-    "ruc_null_fallback": "X",
-    "nombre_null_fallback": "SIN NOMBRE"
-  }
+    {"source_name": "FECHA", "target_field": "fecha"},
+    {"source_name": "TIPO", "target_field": "tipo_documento"},
+    {"source_name": "N° DOCUMENTO", "target_field": "numero_comprobante"},
+    {"source_name": "R. SOCIAL/APELLIDO/NOMBRE", "target_field": "nombre_cliente"},
+    {"source_name": "RUC", "target_field": "ruc"},
+    {"source_name": "GRAV 10%", "target_field": "gravada_10"},
+    {"source_name": "IVA 10%", "target_field": "iva_10"},
+    {"source_name": "GRAV 5%", "target_field": "gravada_5"},
+    {"source_name": "IVA 5%", "target_field": "iva_5"},
+    {"source_name": "EXENTAS", "target_field": "exenta"},
+    {"source_name": "TOTAL", "target_field": "total"}
+  ]
 }
