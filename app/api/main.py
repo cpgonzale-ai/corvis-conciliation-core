@@ -274,6 +274,10 @@ async def reconcile(
         "success": True,
         "lote_id": lote.id,
         "rg90_total_rows": len(rg90_rows),
+        # Para el nuevo Paso 3 (Adjuntar RG90), que ahora lista los registros de la RG90 tal
+        # como se parsearon, antes de mostrar el resultado de la comparación en el Paso 4 —
+        # mismo criterio que /api/compras/reconcile con rg_rows.
+        "rg90_rows": rg90_rows,
         "summary": {
             "coinciden": coinciden,
             "no_en_rg90": no_en_rg90,
