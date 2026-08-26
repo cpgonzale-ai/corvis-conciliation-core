@@ -103,6 +103,7 @@ class LocalCreate(BaseModel):
     nombre: str = Field(min_length=1, max_length=150)
     punto_expedicion: str = Field(min_length=1, max_length=10)
     codigo: str | None = Field(default=None, max_length=30)
+    abreviatura: str | None = Field(default=None, max_length=20)
     estado: str = Field(default="activo", pattern="^(activo|inactivo)$")
 
 
@@ -110,6 +111,7 @@ class LocalUpdate(BaseModel):
     nombre: str | None = Field(default=None, min_length=1, max_length=150)
     punto_expedicion: str | None = Field(default=None, min_length=1, max_length=10)
     codigo: str | None = Field(default=None, max_length=30)
+    abreviatura: str | None = Field(default=None, max_length=20)
     estado: str | None = Field(default=None, pattern="^(activo|inactivo)$")
 
 
@@ -118,6 +120,7 @@ class LocalOut(BaseModel):
     nombre: str
     punto_expedicion: str
     codigo: str | None
+    abreviatura: str | None
     estado: str
     created_at: datetime
     updated_at: datetime

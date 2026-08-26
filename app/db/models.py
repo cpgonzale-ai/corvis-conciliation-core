@@ -94,6 +94,9 @@ class Local(Base):
     nombre: Mapped[str] = mapped_column(String(150), nullable=False)
     punto_expedicion: Mapped[str] = mapped_column(String(10), nullable=False, unique=True, index=True)
     codigo: Mapped[str | None] = mapped_column(String(30), nullable=True, unique=True)
+    # Abreviatura de referencia (ej. "JV" para Juan Valdez, ver Minuta 5 — códigos de
+    # sucursal de compras) — solo informativa, no se usa en ninguna validación ni matching.
+    abreviatura: Mapped[str | None] = mapped_column(String(20), nullable=True)
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="activo")  # activo | inactivo
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
