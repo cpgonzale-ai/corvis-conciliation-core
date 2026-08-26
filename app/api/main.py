@@ -234,6 +234,10 @@ async def reconcile(
 
     diffs = reconcile_with_rg90(pos_rows, rg90_rows)
 
+    # Saltos de numeración DENTRO de la RG90 misma (no contra el libro propio) — mismo
+    # detector que ya usa /api/ingest sobre el libro propio, para el Paso 3 (Adjuntar RG90).
+    rg90_gaps = detect_sequence_gaps(rg90_rows)
+
     # Calculate breakdown cards
     no_en_rg90 = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
     no_en_libro = len([d for d in diffs if d["diferencia"] == "No en libro propio"])
@@ -278,6 +282,9 @@ async def reconcile(
         # como se parsearon, antes de mostrar el resultado de la comparación en el Paso 4 —
         # mismo criterio que /api/compras/reconcile con rg_rows.
         "rg90_rows": rg90_rows,
+        # Saltos detectados dentro de la RG90 (Paso 3) — no confundir con "saltos" del
+        # summary de arriba, que cuenta diffs "Salto de numeración" entre libro y RG90.
+        "rg90_gaps": rg90_gaps,
         "summary": {
             "coinciden": coinciden,
             "no_en_rg90": no_en_rg90,
