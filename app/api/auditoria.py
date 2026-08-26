@@ -30,9 +30,9 @@ ACCION_MODULO = {
 MODULO_CAMPO_ID = {"locales": "local_id", "usuarios": "usuario_id", "roles": "rol_id"}
 
 _DESCRIPCIONES = {
-    "alta_local": lambda d: f"Creó el local \"{d.get('nombre', '?')}\" (punto de expedición {d.get('punto_expedicion', '?')})",
+    "alta_local": lambda d: f"Creó el local \"{d.get('nombre', '?')}\" (establecimiento {d.get('establecimiento') or '—'}, punto de expedición {d.get('punto_expedicion') or '—'})",
     "edicion_local": lambda d: f"Editó el local \"{d.get('nombre', '?')}\"",
-    "baja_local": lambda d: f"Eliminó el local \"{d.get('nombre', '?')}\" (punto de expedición {d.get('punto_expedicion', '?')})",
+    "baja_local": lambda d: f"Eliminó el local \"{d.get('nombre', '?')}\" (establecimiento {d.get('establecimiento') or '—'}, punto de expedición {d.get('punto_expedicion') or '—'})",
     "alta_usuario": lambda d: f"Creó el usuario {d.get('usuario_creado', '?')} (rol {d.get('rol', '?')})",
     "edicion_usuario": lambda d: f"Editó el usuario {d.get('email', '?')}",
     "baja_usuario": lambda d: f"Desactivó el usuario {d.get('email', '?')}",

@@ -8,7 +8,7 @@ agregados de auditoría.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, String, Boolean, Integer, DateTime, Index, Table, Column
+from sqlalchemy import ForeignKey, String, Boolean, Integer, DateTime, Index, Table, Column, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -85,14 +85,20 @@ class Permiso(Base):
 
 class Local(Base):
     """Locales/puntos de venta del cliente, administrados desde la pantalla de Locales.
-    punto_expedicion son los 3 primeros dígitos del número de documento (ej. '030' en
-    030-001-0017598) — se usan para determinar a qué local corresponde cada comprobante
-    del libro de ventas (Paso 2)."""
+    Un comprobante de ventas numera como Establecimiento-PuntoExpedición-Número (ej. '030'
+    y '001' en 030-001-0017598) — la combinación de las dos primeras columnas identifica a
+    qué local corresponde cada comprobante del libro de ventas (Paso 2); un mismo
+    establecimiento puede tener más de un punto de expedición (y viceversa: un mismo
+    punto de expedición se repite entre establecimientos distintos), por eso son dos
+    columnas separadas y la unicidad es sobre el par, no sobre cada una por sí sola.
+    Ninguna de las dos aplica a los locales "de marca" que usa Compras (ver `codigo`) —
+    quedan en NULL para esas filas."""
     __tablename__ = "locales"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     nombre: Mapped[str] = mapped_column(String(150), nullable=False)
-    punto_expedicion: Mapped[str] = mapped_column(String(10), nullable=False, unique=True, index=True)
+    establecimiento: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    punto_expedicion: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
     codigo: Mapped[str | None] = mapped_column(String(30), nullable=True, unique=True)
     # Abreviatura de referencia (ej. "JV" para Juan Valdez, ver Minuta 5 — códigos de
     # sucursal de compras) — solo informativa, no se usa en ninguna validación ni matching.
@@ -100,6 +106,10 @@ class Local(Base):
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="activo")  # activo | inactivo
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("establecimiento", "punto_expedicion", name="uq_locales_establecimiento_punto_expedicion"),
+    )
 
 
 class LoteProcesamiento(Base):

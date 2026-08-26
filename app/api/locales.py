@@ -1,8 +1,8 @@
 """Router de administración de Locales (CU nuevo: pantalla de Locales).
 
-punto_expedicion son los 3 primeros dígitos del número de documento (ej. '030' en
-030-001-0017598) — el frontend los usa para determinar a qué local corresponde cada
-comprobante del libro de ventas en el Paso 2."""
+establecimiento y punto_expedicion son las dos primeras partes del número de documento
+(ej. '030' y '001' en 030-001-0017598) — el frontend usa el PAR para determinar a qué
+local corresponde cada comprobante del libro de ventas en el Paso 2."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -25,20 +25,27 @@ def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, det
     db.commit()
 
 
-def _validar_unicidad(db: Session, punto_expedicion: str | None, codigo: str | None, excluir_id: int | None = None):
-    """punto_expedicion y código no pueden repetirse entre locales (dos locales con el
-    mismo punto de expedición harían ambigua la resolución automática del local en el Paso
-    2). código sí puede quedar vacío en varios locales — solo se valida cuando viene con
-    valor."""
-    if punto_expedicion:
-        q = db.query(Local).filter(Local.punto_expedicion == punto_expedicion)
+def _validar_unicidad(
+    db: Session,
+    establecimiento: str | None,
+    punto_expedicion: str | None,
+    codigo: str | None,
+    excluir_id: int | None = None,
+):
+    """El PAR establecimiento + punto de expedición no puede repetirse entre locales (dos
+    locales con el mismo par harían ambigua la resolución automática del local en el Paso
+    2) — cada campo por separado sí puede repetirse (ej. el punto de expedición "001" es
+    normal que se repita entre establecimientos distintos). código sí puede quedar vacío en
+    varios locales — solo se valida cuando viene con valor."""
+    if establecimiento and punto_expedicion:
+        q = db.query(Local).filter(Local.establecimiento == establecimiento, Local.punto_expedicion == punto_expedicion)
         if excluir_id is not None:
             q = q.filter(Local.id != excluir_id)
         existente = q.first()
         if existente:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"El punto de expedición \"{punto_expedicion}\" ya está asignado al local \"{existente.nombre}\".",
+                detail=f"El establecimiento \"{establecimiento}\" con punto de expedición \"{punto_expedicion}\" ya está asignado al local \"{existente.nombre}\".",
             )
     if codigo:
         q = db.query(Local).filter(Local.codigo == codigo)
@@ -66,12 +73,12 @@ def crear_local(
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(require_permission("boton:locales.crear")),
 ):
-    _validar_unicidad(db, datos.punto_expedicion, datos.codigo)
+    _validar_unicidad(db, datos.establecimiento, datos.punto_expedicion, datos.codigo)
     nuevo = Local(**datos.model_dump())
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
-    _log_evento(db, usuario.id, "alta_local", request, detalle={"local_id": nuevo.id, "nombre": nuevo.nombre, "punto_expedicion": nuevo.punto_expedicion})
+    _log_evento(db, usuario.id, "alta_local", request, detalle={"local_id": nuevo.id, "nombre": nuevo.nombre, "establecimiento": nuevo.establecimiento, "punto_expedicion": nuevo.punto_expedicion})
     return nuevo
 
 
@@ -89,6 +96,7 @@ def editar_local(
     cambios = datos.model_dump(exclude_unset=True)
     _validar_unicidad(
         db,
+        cambios.get("establecimiento", local.establecimiento),
         cambios.get("punto_expedicion", local.punto_expedicion),
         cambios.get("codigo", local.codigo),
         excluir_id=local.id,
@@ -111,7 +119,7 @@ def eliminar_local(
     local = db.get(Local, local_id)
     if not local:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Local no encontrado")
-    detalle = {"local_id": local.id, "nombre": local.nombre, "punto_expedicion": local.punto_expedicion}
+    detalle = {"local_id": local.id, "nombre": local.nombre, "establecimiento": local.establecimiento, "punto_expedicion": local.punto_expedicion}
     db.delete(local)
     db.commit()
     _log_evento(db, usuario.id, "baja_local", request, detalle=detalle)
