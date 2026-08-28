@@ -584,8 +584,8 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "doc": doc,
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
-                    "libro": pos_rec["total"],
-                    "rg90": "—",
+                    "libro": _lado_diff_ventas(pos_rec),
+                    "rg90": _lado_diff_ventas(None),
                     "diferencia": "Anulada"
                 })
                 continue
@@ -593,8 +593,8 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 "doc": doc,
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": pos_rec["total"],
-                "rg90": "—",
+                "libro": _lado_diff_ventas(pos_rec),
+                "rg90": _lado_diff_ventas(None),
                 "diferencia": "No llegó a la interfaz"
             })
         elif rg_rec and not pos_rec:
@@ -602,8 +602,8 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 "doc": doc,
                 "sistema": rg_rec.get("sistema", "RG90"),
                 "local": rg_rec.get("local", "Desconocido"),
-                "libro": "—",
-                "rg90": rg_rec["total"],
+                "libro": _lado_diff_ventas(None),
+                "rg90": _lado_diff_ventas(rg_rec),
                 "diferencia": "No en libro propio"
             })
         elif pos_rec and rg_rec:
@@ -624,8 +624,8 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "doc": doc,
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
-                    "libro": pos_rec["total"],
-                    "rg90": rg_rec["total"],
+                    "libro": _lado_diff_ventas(pos_rec),
+                    "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Diferencia de monto",
                     "diferencias_detalle": campo_diffs,
                 })
@@ -634,8 +634,8 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "doc": doc,
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
-                    "libro": pos_rec["total"],
-                    "rg90": "Rechazada",
+                    "libro": _lado_diff_ventas(pos_rec),
+                    "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Rechazada"
                 })
             elif pos_rec["estado"].lower() == "anulada" or rg_rec.get("estado", "").lower() == "anulada":
@@ -643,9 +643,25 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "doc": doc,
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
-                    "libro": pos_rec["total"],
-                    "rg90": "Anulada",
+                    "libro": _lado_diff_ventas(pos_rec),
+                    "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Anulada"
                 })
 
     return diffs
+
+
+def _lado_diff_ventas(rec: Dict[str, Any] | None) -> Dict[str, str]:
+    """Arma el desglose (gravada 10%/5%, IVA 10%/5%, exenta, total) de un lado de la
+    comparación (libro de ventas o RG90) — mismo criterio que _lado_diff() en
+    compras_engine.py. Vacío ('—') cuando ese lado no tiene el comprobante."""
+    if rec is None:
+        return {"gravada_10": "—", "iva_10": "—", "gravada_5": "—", "iva_5": "—", "exenta": "—", "total": "—"}
+    return {
+        "gravada_10": rec["gravadas"],
+        "iva_10": rec["iva"],
+        "gravada_5": rec.get("gravadas_5", "0,00"),
+        "iva_5": rec.get("iva_5", "0,00"),
+        "exenta": rec["exentas"],
+        "total": rec["total"],
+    }
