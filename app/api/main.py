@@ -222,57 +222,75 @@ async def reconcile(
     lote_id = int(lote_id_raw) if lote_id_raw else None
     pos_rows = json.loads(pos_data_json)
 
-    rg90_rows = []
-    loop = asyncio.get_event_loop()
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        for rg90_file in rg90_files:
-            tmp_path = os.path.join(tmp_dir, rg90_file.filename)
-            with open(tmp_path, "wb") as buffer:
-                shutil.copyfileobj(rg90_file.file, buffer)
-            rg90_file_rows, _rg90_cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "rg90_set", "RG90 SET")
-            rg90_rows.extend(rg90_file_rows)
+    # Envuelve todo el cuerpo (no solo la ingesta de la RG90): antes, cualquier excepción
+    # no prevista acá (ej. sobre un archivo real más grande o con datos atípicos que no
+    # aparecieron en los archivos de prueba) devolvía un 500 genérico de Starlette sin
+    # ningún detalle, indistinguible en el frontend de cualquier otro error — quedaba
+    # imposible de diagnosticar sin acceso al log del servidor. Con esto, el mensaje real
+    # de la excepción llega hasta la pantalla.
+    try:
+        rg90_rows = []
+        loop = asyncio.get_event_loop()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for rg90_file in rg90_files:
+                tmp_path = os.path.join(tmp_dir, rg90_file.filename)
+                with open(tmp_path, "wb") as buffer:
+                    shutil.copyfileobj(rg90_file.file, buffer)
+                # Mismo criterio que /api/compras/reconcile: un archivo que no corresponde
+                # al formato de la RG90 (firma no encontrada, hoja inesperada, etc.) no debe
+                # tumbar el pedido entero con un 500 genérico — se informa qué archivo falló
+                # y por qué.
+                try:
+                    rg90_file_rows, _rg90_cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "rg90_set", "RG90 SET")
+                except ValueError as e:
+                    raise HTTPException(status_code=422, detail=f"Error al procesar el archivo RG90 '{rg90_file.filename}': {e}")
+                rg90_rows.extend(rg90_file_rows)
 
-    diffs = reconcile_with_rg90(pos_rows, rg90_rows)
+        diffs = reconcile_with_rg90(pos_rows, rg90_rows)
 
-    # Saltos de numeración DENTRO de la RG90 misma (no contra el libro propio) — mismo
-    # detector que ya usa /api/ingest sobre el libro propio, para el Paso 3 (Adjuntar RG90).
-    rg90_gaps = detect_sequence_gaps(rg90_rows)
+        # Saltos de numeración DENTRO de la RG90 misma (no contra el libro propio) — mismo
+        # detector que ya usa /api/ingest sobre el libro propio, para el Paso 3 (Adjuntar RG90).
+        rg90_gaps = detect_sequence_gaps(rg90_rows)
 
-    # Calculate breakdown cards
-    no_en_rg90 = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
-    no_en_libro = len([d for d in diffs if d["diferencia"] == "No en libro propio"])
-    saltos = len([d for d in diffs if d["diferencia"] == "Salto de numeración"])
-    anuladas = len([d for d in diffs if d["diferencia"] == "Anulada"])
-    diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
-    coinciden = max(0, len(pos_rows) - no_en_rg90 - diferencia_monto - anuladas)
+        # Calculate breakdown cards
+        no_en_rg90 = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
+        no_en_libro = len([d for d in diffs if d["diferencia"] == "No en libro propio"])
+        saltos = len([d for d in diffs if d["diferencia"] == "Salto de numeración"])
+        anuladas = len([d for d in diffs if d["diferencia"] == "Anulada"])
+        diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
+        coinciden = max(0, len(pos_rows) - no_en_rg90 - diferencia_monto - anuladas)
 
-    lote = db.get(LoteProcesamiento, lote_id) if lote_id else None
-    if lote is None:
-        # Sin lote de origen (llamada directa a /reconcile): se crea uno mínimo para trazabilidad.
-        lote = LoteProcesamiento(
-            usuario_id=usuario.id,
-            tipo_libro="venta",
-            sistema_origen="rg90",
-            cantidad_comprobantes=len(pos_rows),
-            estado="comparado_rg90",
-        )
-        db.add(lote)
-        db.flush()
-    else:
-        lote.estado = "comparado_rg90"
+        lote = db.get(LoteProcesamiento, lote_id) if lote_id else None
+        if lote is None:
+            # Sin lote de origen (llamada directa a /reconcile): se crea uno mínimo para trazabilidad.
+            lote = LoteProcesamiento(
+                usuario_id=usuario.id,
+                tipo_libro="venta",
+                sistema_origen="rg90",
+                cantidad_comprobantes=len(pos_rows),
+                estado="comparado_rg90",
+            )
+            db.add(lote)
+            db.flush()
+        else:
+            lote.estado = "comparado_rg90"
 
-    nombres_rg90 = ", ".join(f.filename for f in rg90_files)
-    db.add(ResultadoRG90(
-        lote_id=lote.id,
-        archivo_rg90_nombre=nombres_rg90,
-        total_coinciden=coinciden,
-        total_no_en_rg90=no_en_rg90,
-        total_no_en_libro=no_en_libro,
-        total_saltos=saltos,
-    ))
-    db.commit()
+        nombres_rg90 = ", ".join(f.filename for f in rg90_files)
+        db.add(ResultadoRG90(
+            lote_id=lote.id,
+            archivo_rg90_nombre=nombres_rg90,
+            total_coinciden=coinciden,
+            total_no_en_rg90=no_en_rg90,
+            total_no_en_libro=no_en_libro,
+            total_saltos=saltos,
+        ))
+        db.commit()
 
-    _log_evento(db, usuario.id, "comparacion_rg90", request, lote_id=lote.id, detalle={"archivos_rg90": [f.filename for f in rg90_files], "total_diferencias": len(diffs)})
+        _log_evento(db, usuario.id, "comparacion_rg90", request, lote_id=lote.id, detalle={"archivos_rg90": [f.filename for f in rg90_files], "total_diferencias": len(diffs)})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error inesperado al comparar contra la RG90 ({type(e).__name__}): {e}")
 
     return {
         "success": True,
