@@ -6,6 +6,7 @@ Handles ingestion, profile matching, sequence gap detection, and RG90 SQL-based 
 import os
 import re
 import json
+import unicodedata
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
@@ -58,6 +59,74 @@ def clean_numeric(val: Any) -> float:
         return float(s)
     except ValueError:
         return 0.0
+
+
+def _normalizar_tipo(s: str) -> str:
+    """Normaliza un 'Tipo de Comprobante' para compararlo sin importar tildes ni mayúsculas.
+    La terminología oficial del SET usa tildes (ej. 'NOTA DE CRÉDITO', 'BOLETO O TICKET DE
+    TRANSPORTE AÉREO'), pero los reportes reales exportados no siempre las conservan — así se
+    puede declarar el perfil una sola vez, con la ortografía oficial, y que matchee ambas
+    formas sin tener que listar cada variante a mano."""
+    s = unicodedata.normalize("NFKD", s.strip().upper())
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+# Conectores que quedan en minúscula al armar un título en español (salvo que sean la
+# primera palabra) — usado para mostrar el "Tipo de Comprobante" tal como vino del archivo,
+# en vez de forzarlo a "Factura"/"Nota de Crédito" (ver tipo_doc en _process_dataframe).
+_CONECTORES_MINUSCULA_ES = {"de", "del", "la", "y", "o", "a", "en", "para"}
+
+
+def _titulo_es(s: str) -> str:
+    palabras = s.strip().lower().split()
+    return " ".join(
+        w if (i > 0 and w in _CONECTORES_MINUSCULA_ES) else (w[:1].upper() + w[1:])
+        for i, w in enumerate(palabras)
+    )
+
+
+
+# Tipos de Comprobante oficiales del SET (Cuadro de Tipos de Comprobante de la RG 90),
+# además de Factura y Nota de Crédito que ya tienen su propio branch en tipo_doc_display —
+# estos se muestran tal como vienen del archivo. El resto de los perfiles usa el mismo campo
+# "tipo_documento"/"tipo_comprobante" con otro propósito: Hiopos, por ejemplo, lo usa como
+# subtipo interno del POS solo para filtrar filas ("Factura venta", "Abono factura venta
+# simplificada"), no como la clasificación legal del comprobante — mostrar eso tal cual
+# rompería el badge Factura/Nota de Crédito que el resto del sistema ya asume.
+_TIPOS_COMPROBANTE_SET_EXTRA = {
+    _normalizar_tipo(t) for t in [
+        "AUTOFACTURA",
+        "BOLETA DE TRANSPORTE PÚBLICO DE PASAJEROS",
+        "BOLETA DE VENTA",
+        "BOLETA RESIMPLE",
+        "BOLETOS DE LOTERÍAS, JUEGOS DE AZAR",
+        "BOLETO O TICKET DE TRANSPORTE AÉREO",
+        "DESPACHO DE IMPORTACIÓN",
+        "ENTRADA A ESPECTÁCULOS PÚBLICOS",
+        "NOTA DE DÉBITO",
+        "TICKET MÁQUINA REGISTRADORA",
+    ]
+}
+
+
+def tipo_doc_display(tipo_doc_raw: str, es_credito: bool) -> str:
+    """Etiqueta de tipo de comprobante para la grilla. Factura y Nota de Crédito siempre se
+    muestran con su ortografía canónica (acentuada), sin importar cómo los haya escrito el
+    archivo de origen. Los demás tipos de comprobante oficiales del SET (Boleta de Venta,
+    Nota de Débito, Ticket Máquina Registradora, Autofactura, etc. — ver
+    _TIPOS_COMPROBANTE_SET_EXTRA) se muestran con el texto tal como vino del archivo, con
+    mayúsculas iniciales. Cualquier otro valor (subtipos internos del sistema de origen que
+    no son parte de esta clasificación legal, ej. Hiopos) cae al binario Factura/Nota de
+    Crédito de siempre, inferido por es_credito."""
+    if tipo_doc_raw:
+        norm = _normalizar_tipo(tipo_doc_raw)
+        if norm == _normalizar_tipo("NOTA DE CREDITO"):
+            return "Nota de Crédito"
+        if norm == _normalizar_tipo("FACTURA"):
+            return "Factura"
+        if norm in _TIPOS_COMPROBANTE_SET_EXTRA:
+            return _titulo_es(tipo_doc_raw)
+    return "Nota de Crédito" if es_credito else "Factura"
 
 
 def fix_mojibake(s: str) -> str:
@@ -357,16 +426,25 @@ class IngestionEngine:
             if corte:
                 cortes.append(corte)
 
-            # Filtro explícito por "Tipo Documento" (Hiopos): solo se procesan factura de
-            # venta, factura de venta simplificada, abono factura de venta y abono factura de
-            # venta simplificada. El resto (pedido/albarán/factura de compra, merma,
-            # invitación, recuento, filas vacías) se descarta acá directamente, sin depender
-            # únicamente de que su serie no calce con el patrón EEE-PPP.
+            # "Tipo de Comprobante"/"Tipo Documento" crudo, tal como viene del archivo —
+            # se captura siempre (no solo cuando hay lista de permitidos) porque más abajo
+            # también se usa para armar el tipo_doc que se muestra en la grilla (ver el
+            # cierre de este for), en vez de forzar todo a Factura/Nota de Crédito.
+            tipo_doc_raw = fix_mojibake(str(r.get("tipo_documento") or "").strip())
+
+            # Filtro explícito por tipo de comprobante, declarado por perfil: Hiopos solo
+            # procesa factura de venta, factura de venta simplificada, abono factura de venta
+            # y abono factura de venta simplificada (descarta pedido/albarán/factura de
+            # compra, merma, invitación, recuento, filas vacías); la RG90 y el Formato
+            # Universal listan los tipos de comprobante oficiales del SET que aplican a
+            # Ventas (Factura, Nota de Crédito, Nota de Débito, Boleta de Venta, Ticket
+            # Máquina Registradora, etc. — ver perfiles). El resto se descarta acá
+            # directamente, sin depender únicamente de que su serie calce con el patrón
+            # EEE-PPP.
             tipos_permitidos = profile.get("tipo_documento_permitidos")
             if tipos_permitidos is not None:
-                tipo_doc_raw = fix_mojibake(str(r.get("tipo_documento") or "").strip())
-                permitidos_lower = {t.lower() for t in tipos_permitidos}
-                if tipo_doc_raw.lower() not in permitidos_lower:
+                permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos}
+                if _normalizar_tipo(tipo_doc_raw) not in permitidos_norm:
                     continue
 
             serie = str(r.get("serie") or "").strip()
@@ -403,15 +481,16 @@ class IngestionEngine:
 
             # Tercera forma de detectar nota de crédito, para perfiles que no tienen ni
             # marcador de sección (Aloha) ni prefijo "NC" en la serie (Hiopos) — el Formato
-            # Universal (Minuta) trae un campo "TIPO" por fila ("FACTURA" / "NOTA DE
-            # CREDITO") en vez de eso. El monto ya viene en negativo en el archivo de
-            # origen para estas filas, así que acá solo hace falta marcar es_credito; el
-            # signo final se recalcula igual (abs + signo) más abajo.
-            notas_credito_por_tipo = {t.upper() for t in profile.get("tipo_documento_notas_credito", [])}
-            if notas_credito_por_tipo:
-                tipo_doc_val = fix_mojibake(str(r.get("tipo_documento") or "").strip()).upper()
-                if tipo_doc_val in notas_credito_por_tipo:
-                    es_credito = True
+            # Universal (Minuta) y la RG90 traen un campo "Tipo" por fila ("FACTURA" / "NOTA
+            # DE CREDITO") en vez de eso. El monto ya viene en negativo en el archivo de
+            # origen para estas filas (Universal), así que acá solo hace falta marcar
+            # es_credito; el signo final se recalcula igual (abs + signo) más abajo. Los
+            # demás tipos permitidos (Nota de Débito, Boleta de Venta, Ticket Máquina
+            # Registradora, etc.) NO entran acá — quedan con signo positivo, igual que una
+            # Factura.
+            notas_credito_por_tipo = {_normalizar_tipo(t) for t in profile.get("tipo_documento_notas_credito", [])}
+            if notas_credito_por_tipo and _normalizar_tipo(tipo_doc_raw) in notas_credito_por_tipo:
+                es_credito = True
 
             raw_doc = r.get("numero_comprobante")
             if serie_for_doc and not str(raw_doc).startswith(serie_for_doc):
@@ -498,7 +577,12 @@ class IngestionEngine:
                 "exentas_num": exenta,
                 "total_num": total,
                 "estado": estado,
-                "tipo_doc": "Nota de Crédito" if es_credito else "Factura",
+                # Se muestra el tipo de comprobante tal como vino del archivo (Boleta de
+                # Venta, Nota de Débito, Ticket Máquina Registradora, etc. — ver Tipos de
+                # Comprobante del SET) en vez de forzar todo a Factura/Nota de Crédito;
+                # Aloha no trae este campo por fila (usa el marcador de sección), así que
+                # ahí se sigue infiriendo por es_credito.
+                "tipo_doc": tipo_doc_display(tipo_doc_raw, es_credito),
             })
 
         return processed_rows, cortes

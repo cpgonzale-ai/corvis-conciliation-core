@@ -35,9 +35,11 @@ from app.core.engine import (
     DOC_PATTERN,
     _matches_profile_signature,
     _monto_diff,
+    _normalizar_tipo,
     clean_numeric,
     fix_mojibake,
     normalize_invoice_number,
+    tipo_doc_display,
 )
 
 # Códigos de nota de crédito del sistema origen ("NC", "NCE") + el texto largo tal como lo
@@ -141,19 +143,24 @@ class ComprasEngine:
         records_df = pd.DataFrame(extracted)
 
         tipos_permitidos = profile.get("tipo_comprobante_permitidos")
-        permitidos_lower = {t.lower() for t in tipos_permitidos} if tipos_permitidos is not None else None
+        # Comparación sin tildes/mayúsculas (_normalizar_tipo): la lista se declara con la
+        # ortografía oficial del SET (ej. "NOTA DE CRÉDITO"), pero el archivo real no
+        # siempre trae la tilde.
+        permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos} if tipos_permitidos is not None else None
 
         rows: List[Dict[str, Any]] = []
         for _, r in records_df.iterrows():
             tipo_comprobante = fix_mojibake(str(r.get("tipo_comprobante") or "").strip())
 
-            # Filtro explícito por tipo de comprobante (ej. Formato Universal, que además de
-            # Factura/Nota de Crédito puede traer filas de "Despacho" u otros documentos no
-            # fiscales que no deben entrar al libro de compras). Sin esta lista, un
+            # Filtro explícito por tipo de comprobante, declarado por perfil: la RG de
+            # compras admite todos los tipos de comprobante que el SET reconoce para el
+            # libro de compras (Factura, Nota de Crédito, Nota de Débito, Autofactura,
+            # Boleta de Venta, Ticket Máquina Registradora, etc.); el Formato Universal, en
+            # cambio, solo trae Factura/Nota de Crédito en la práctica. Sin esta lista, un
             # comprobante con un número interno no fiscal (ej. "25030IC0400716") puede
             # terminar armando un doc EEE-PPP-NNNNNNN inventado que sí pasa la validación de
             # formato — se corta antes, por tipo, no solo por si el número calza.
-            if permitidos_lower is not None and tipo_comprobante.lower() not in permitidos_lower:
+            if permitidos_norm is not None and _normalizar_tipo(tipo_comprobante) not in permitidos_norm:
                 continue
 
             doc = normalize_invoice_number(r.get("documento"))
@@ -188,7 +195,10 @@ class ComprasEngine:
                 "dv_proveedor": dv,
                 "proveedor": proveedor,
                 "tipo_comprobante": tipo_comprobante or ("NOTA DE CRÉDITO" if es_credito else "FACTURA"),
-                "tipo_doc": "Nota de Crédito" if es_credito else "Factura",
+                # Se muestra el tipo de comprobante tal como vino del archivo (Autofactura,
+                # Boleta de Venta, Nota de Débito, Ticket Máquina Registradora, etc.) en vez
+                # de forzar todo a Factura/Nota de Crédito.
+                "tipo_doc": tipo_doc_display(tipo_comprobante, es_credito),
                 "condicion": str(r.get("condicion") or "").strip(),
                 "timbrado": _texto_identificador(r.get("timbrado")),
                 "control": _texto_identificador(r.get("control")),
