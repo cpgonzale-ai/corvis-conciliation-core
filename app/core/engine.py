@@ -109,6 +109,10 @@ _TIPOS_COMPROBANTE_SET_EXTRA = {
 }
 
 
+_NORM_NOTA_CREDITO = _normalizar_tipo("NOTA DE CREDITO")
+_NORM_FACTURA = _normalizar_tipo("FACTURA")
+
+
 def tipo_doc_display(tipo_doc_raw: str, es_credito: bool) -> str:
     """Etiqueta de tipo de comprobante para la grilla. Factura y Nota de Crédito siempre se
     muestran con su ortografía canónica (acentuada), sin importar cómo los haya escrito el
@@ -117,12 +121,15 @@ def tipo_doc_display(tipo_doc_raw: str, es_credito: bool) -> str:
     _TIPOS_COMPROBANTE_SET_EXTRA) se muestran con el texto tal como vino del archivo, con
     mayúsculas iniciales. Cualquier otro valor (subtipos internos del sistema de origen que
     no son parte de esta clasificación legal, ej. Hiopos) cae al binario Factura/Nota de
-    Crédito de siempre, inferido por es_credito."""
+    Crédito de siempre, inferido por es_credito. (Las constantes _NORM_* se calculan una
+    sola vez al importar el módulo — esta función se llama una vez por fila del libro, y
+    con archivos reales de decenas de miles de filas recalcularlas en cada llamada es un
+    costo innecesario que se nota.)"""
     if tipo_doc_raw:
         norm = _normalizar_tipo(tipo_doc_raw)
-        if norm == _normalizar_tipo("NOTA DE CREDITO"):
+        if norm == _NORM_NOTA_CREDITO:
             return "Nota de Crédito"
-        if norm == _normalizar_tipo("FACTURA"):
+        if norm == _NORM_FACTURA:
             return "Factura"
         if norm in _TIPOS_COMPROBANTE_SET_EXTRA:
             return _titulo_es(tipo_doc_raw)
@@ -201,6 +208,18 @@ def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
     como una fila nueva al final del DataFrame — se procesan después exactamente igual que
     cualquier otra fila (mismos filtros, mismo mapeo de columnas).
     """
+    # Chequeo rápido y vectorizado antes de entrar al loop celda por celda: en la enorme
+    # mayoría de los archivos (y en la totalidad de los reportes oficiales de la RG90/RG,
+    # que no pasan por edición manual) no hay ninguna celda con salto de línea, así que no
+    # hay nada que reparar. Confirmado sobre un archivo real de 65.535 filas: el loop
+    # completo tardaba ~30 s; este chequeo, 0,1 s.
+    tiene_embebidas = any(
+        df[col].dtype == object and df[col].astype(str).str.contains("\n", regex=False, na=False).any()
+        for col in df.columns
+    )
+    if not tiene_embebidas:
+        return df
+
     ncols = len(df.columns)
     extra_rows: List[List[Any]] = []
 
@@ -242,6 +261,35 @@ def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
         df = pd.concat([df, extra_df], ignore_index=True)
 
     return df
+
+
+def _usecols_para_perfil(profile: Dict) -> Optional[Any]:
+    """Devuelve un filtro de columnas para pasarle a pd.read_excel/read_csv, cuando el
+    perfil lo permite, para no leer columnas que no se van a usar.
+
+    Confirmado sobre un archivo real de la RG90 ("SOLO VENTAS MAYO 2026.xls", 31 MB): tiene
+    formato aplicado a las 65.536 filas × 256 columnas máximas de un .xls (aunque los datos
+    reales ocupen una fracción), y con xlrd cada una de esas ~16,7 millones de celdas se
+    procesa en Python puro — pandas tardaba más de 4 minutos en leerlo completo. Reducido a
+    solo las columnas que el perfil realmente mapea (11 de 256), el mismo archivo se lee en
+    ~11 segundos.
+
+    Se devuelve un callable, no una lista, para que una columna ausente en el archivo no
+    haga fallar la lectura entera (usecols=[lista] tira ValueError si algún nombre no
+    aparece; usecols=callable simplemente no la incluye) — mismo criterio tolerante que ya
+    usa _process_dataframe con `df[c_name] if c_name in df.columns else ...`.
+
+    Solo aplica cuando TODAS las columnas del perfil se mapean por nombre (source_name);
+    perfiles que mezclan mapeo por posición (source_col, ej. Aloha/Hiopos) devuelven None
+    (sin optimizar) porque ahí no se puede saber de antemano qué nombre de columna
+    corresponde a cada posición sin leer el archivo primero.
+    """
+    mappings = profile.get("column_mappings", [])
+    nombres = [m.get("source_name") for m in mappings if "source_name" in m]
+    if not mappings or len(nombres) != len(mappings):
+        return None
+    nombres_set = set(nombres)
+    return lambda c: c in nombres_set
 
 
 def _matches_profile_signature(file_path: str, sheet_names: List[str], profile: Dict) -> bool:
@@ -362,12 +410,13 @@ class IngestionEngine:
         else:
             candidatos += [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet and i not in candidatos]
 
+        usecols = _usecols_para_perfil(profile)
         rows: List[Dict[str, Any]] = []
         cortes: List[Dict[str, Any]] = []
         for idx in candidatos:
             if idx >= len(sheet_names):
                 continue
-            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx)
+            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, usecols=usecols)
             df = _repair_embedded_rows(df)
             rows, cortes = self._process_dataframe(df, profile, local_name)
             if rows:
@@ -412,6 +461,14 @@ class IngestionEngine:
         factura_marker = str(profile.get("section_factura_marker", "FACTURA")).strip().upper()
         current_section = "factura"
 
+        # Normalizados UNA sola vez por archivo, no por fila — con un archivo real de
+        # 65.535 filas, recalcular estos dos sets en cada iteración (como quedó al agregar
+        # el filtro de tipos de comprobante) representaba ~1 millón de llamadas de más a
+        # _normalizar_tipo y cerca de un tercio del tiempo total de procesamiento.
+        tipos_permitidos = profile.get("tipo_documento_permitidos")
+        permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos} if tipos_permitidos is not None else None
+        notas_credito_por_tipo = {_normalizar_tipo(t) for t in profile.get("tipo_documento_notas_credito", [])}
+
         for idx, r in records_df.iterrows():
             if marker_col is not None and marker_col < len(df.columns):
                 raw_marker = df.iat[idx, marker_col]
@@ -422,9 +479,14 @@ class IngestionEngine:
                     elif marker_txt == factura_marker:
                         current_section = "factura"
 
-            corte = _extract_corte(df.iloc[idx].tolist(), current_section)
-            if corte:
-                cortes.append(corte)
+            # Los cortes/subtotales ("Serie: 001 Totales", etc.) son un artefacto propio del
+            # formato de Aloha (imprime esas filas al cierre de cada bloque) — para el resto
+            # de los perfiles esto es trabajo desperdiciado, y df.iloc[idx] (acceso posicional
+            # fila a fila) es particularmente lento dentro de un loop de miles de filas.
+            if marker_col is not None:
+                corte = _extract_corte(df.iloc[idx].tolist(), current_section)
+                if corte:
+                    cortes.append(corte)
 
             # "Tipo de Comprobante"/"Tipo Documento" crudo, tal como viene del archivo —
             # se captura siempre (no solo cuando hay lista de permitidos) porque más abajo
@@ -441,11 +503,8 @@ class IngestionEngine:
             # Máquina Registradora, etc. — ver perfiles). El resto se descarta acá
             # directamente, sin depender únicamente de que su serie calce con el patrón
             # EEE-PPP.
-            tipos_permitidos = profile.get("tipo_documento_permitidos")
-            if tipos_permitidos is not None:
-                permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos}
-                if _normalizar_tipo(tipo_doc_raw) not in permitidos_norm:
-                    continue
+            if permitidos_norm is not None and _normalizar_tipo(tipo_doc_raw) not in permitidos_norm:
+                continue
 
             serie = str(r.get("serie") or "").strip()
             serie_norm = fix_mojibake(serie)
@@ -488,7 +547,6 @@ class IngestionEngine:
             # demás tipos permitidos (Nota de Débito, Boleta de Venta, Ticket Máquina
             # Registradora, etc.) NO entran acá — quedan con signo positivo, igual que una
             # Factura.
-            notas_credito_por_tipo = {_normalizar_tipo(t) for t in profile.get("tipo_documento_notas_credito", [])}
             if notas_credito_por_tipo and _normalizar_tipo(tipo_doc_raw) in notas_credito_por_tipo:
                 es_credito = True
 

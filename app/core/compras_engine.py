@@ -36,6 +36,7 @@ from app.core.engine import (
     _matches_profile_signature,
     _monto_diff,
     _normalizar_tipo,
+    _usecols_para_perfil,
     clean_numeric,
     fix_mojibake,
     normalize_invoice_number,
@@ -103,9 +104,14 @@ class ComprasEngine:
         ext = os.path.splitext(file_path)[1].lower()
         hdr_idx = profile.get("header_row_index", 0)
         sheet_index = profile.get("sheet_index", 0)
+        # Ver _usecols_para_perfil en engine.py: limita la lectura a las columnas que el
+        # perfil realmente mapea — la RG de compras tiene el mismo problema de rendimiento
+        # que la RG90 de ventas con archivos .xls grandes (65.536×256 celdas por formato
+        # aplicado a toda la hoja).
+        usecols = _usecols_para_perfil(profile)
 
         if ext not in [".xls", ".xlsx"]:
-            df = pd.read_csv(file_path, sep=";", header=hdr_idx)
+            df = pd.read_csv(file_path, sep=";", header=hdr_idx, usecols=usecols)
         else:
             sheet_names = pd.ExcelFile(file_path).sheet_names
             if not _matches_profile_signature(file_path, sheet_names, profile):
@@ -128,7 +134,7 @@ class ComprasEngine:
                     )
                 sheet_index = encontrada
 
-            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index)
+            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index, usecols=usecols)
 
         df.columns = [str(c).strip() for c in df.columns]
         return self._process_dataframe(df, profile, local_name)
