@@ -142,7 +142,11 @@ class ComprasEngine:
         extracted = {}
         for spec in mappings:
             target = spec["target_field"]
-            name = spec.get("source_name")
+            # df.columns ya viene "strip"-eado (ver ingest_file) — se compara acá contra el
+            # nombre del perfil también sin espacios al borde, para no depender de que el
+            # perfil declare el espacio exacto que trae el archivo real (ver _usecols_para_perfil
+            # en engine.py, mismo criterio del lado de la lectura).
+            name = str(spec.get("source_name") or "").strip()
             extracted[target] = df[name] if name in df.columns else pd.Series([None] * len(df))
         records_df = pd.DataFrame(extracted)
 

@@ -323,11 +323,18 @@ def _usecols_para_perfil(profile: Dict) -> Optional[Any]:
     haga fallar la lectura entera (usecols=[lista] tira ValueError si algún nombre no
     aparece; usecols=callable simplemente no la incluye) — mismo criterio tolerante que ya
     usa _process_dataframe con `df[c_name] if c_name in df.columns else ...`.
+
+    La comparación ignora espacios al inicio/final (ej. la RG de compras real trae "Monto No
+    Gravado / Exento " con un espacio final que el perfil no declara): sin esto, esa columna
+    se excluía silenciosamente acá mismo, antes de que _process_dataframe llegara a
+    intentar leerla — el campo quedaba siempre en 0 sin ningún error, indistinguible de una
+    columna genuinamente vacía.
     """
     nombres_set = _nombres_columnas_perfil(profile)
     if nombres_set is None:
         return None
-    return lambda c: c in nombres_set
+    nombres_norm = {str(n).strip() for n in nombres_set}
+    return lambda c: c in nombres_set or str(c).strip() in nombres_norm
 
 
 def _matches_profile_signature(file_path: str, sheet_names: List[str], profile: Dict) -> bool:
