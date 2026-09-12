@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy.orm import Session
 
 from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg
+from app.core.engine import detect_sequence_gaps
 from app.core.deps import get_current_user
 from app.db.database import get_db
 from app.db.models import ArchivoProcesado, EventoAuditoria, LoteProcesamiento, ResultadoRG90, Usuario
@@ -133,6 +134,12 @@ async def reconcile_compras(
 
     diffs = reconcile_compras_with_rg(pos_rows, rg_rows)
 
+    # Saltos de numeración DENTRO de la RG de compras misma (agrupados por proveedor — ver
+    # detect_sequence_gaps), no contra el libro propio: acá no hay control de correlatividad
+    # del libro propio, no es responsabilidad del comprador que un proveedor salte
+    # numeración (ver docstring de ComprasEngine).
+    rg_gaps = detect_sequence_gaps(rg_rows)
+
     no_en_rg = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
     no_en_libro = len([d for d in diffs if d["diferencia"] == "No en libro propio"])
     diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
@@ -161,7 +168,7 @@ async def reconcile_compras(
         total_coinciden=coinciden,
         total_no_en_rg90=no_en_rg,
         total_no_en_libro=no_en_libro,
-        total_saltos=0,
+        total_saltos=len(rg_gaps),
     ))
     db.commit()
 
@@ -171,6 +178,7 @@ async def reconcile_compras(
         "no_en_rg": no_en_rg,
         "no_en_libro": no_en_libro,
         "diferencia_monto": diferencia_monto,
+        "saltos_rg": len(rg_gaps),
     })
 
     return {
@@ -181,6 +189,9 @@ async def reconcile_compras(
         # libro propio en el paso 1), para poder consultar ambos lados antes de ver el
         # resultado de la comparación en el paso 3.
         "rg_rows": rg_rows,
+        # Saltos de numeración dentro de la RG misma (ver comentario arriba) — mismo
+        # criterio que rg90_gaps en /api/reconcile (ventas).
+        "rg_gaps": rg_gaps,
         "diffs": diffs,
         "summary": {
             "coinciden": coinciden,

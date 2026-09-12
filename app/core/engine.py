@@ -701,6 +701,13 @@ def detect_sequence_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     el control de correlatividad agrupa por local + serie + "tipo_doc": alcanza con comparar
     ambos campos (Tipo y Documento) para saber si hay un salto real dentro de cada secuencia,
     sin mezclar la numeración de facturas con la de notas de crédito.
+
+    Para filas de compras (que traen "ruc_proveedor") se agrega el RUC del proveedor a la
+    clave de agrupación: a diferencia de ventas, donde todos los documentos los emite la
+    misma entidad, en la RG de compras el mismo establecimiento-punto de expedición puede
+    repetirse entre proveedores distintos (cada uno con su propia numeración) — sin esto,
+    dos facturas de proveedores distintos con esos mismos tres dígitos se verían, por
+    error, como parte de una única secuencia con un salto entre ellas.
     """
     grouped = {}
     for r in rows:
@@ -709,7 +716,8 @@ def detect_sequence_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not m:
             continue
         tipo = r.get("tipo_doc", "Factura")
-        series = f"{r['local']} ({m.group(1)}) — {tipo}"
+        proveedor_prefix = f"{r['ruc_proveedor']} — " if r.get("ruc_proveedor") else ""
+        series = f"{proveedor_prefix}{r['local']} ({m.group(1)}) — {tipo}"
         seq = int(m.group(2))
         if series not in grouped:
             grouped[series] = []
@@ -726,7 +734,7 @@ def detect_sequence_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 missing_start = f"{curr_doc[:8]}{(curr_seq + 1):07d}"
                 missing_end = f"{curr_doc[:8]}{(next_seq - 1):07d}"
                 gap_label = missing_start if diff == 2 else f"{missing_start} → {missing_end}"
-                gaps.append({
+                gap: Dict[str, Any] = {
                     "local": curr_r["local"],
                     "sistema": curr_r["sistema"],
                     "tipo_doc": curr_r.get("tipo_doc", "Factura"),
@@ -734,7 +742,10 @@ def detect_sequence_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "salto": gap_label,
                     "cantidad": diff - 1,
                     "estado": "Pendiente de revisión"
-                })
+                }
+                if curr_r.get("proveedor"):
+                    gap["proveedor"] = curr_r["proveedor"]
+                gaps.append(gap)
 
     return gaps
 
