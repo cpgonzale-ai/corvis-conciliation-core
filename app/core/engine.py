@@ -8,7 +8,6 @@ import re
 import json
 import unicodedata
 import pandas as pd
-import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 from app.core.date_parser import parse_date, format_display_date
 
@@ -59,6 +58,17 @@ def clean_numeric(val: Any) -> float:
         return float(s)
     except ValueError:
         return 0.0
+
+
+def fmt_gs(n: float) -> str:
+    """Formatea un importe al revés de clean_numeric: de float a texto es-PY (punto de
+    miles, coma decimal), sin redondear a entero — se muestra tal como viene calculado del
+    Excel, con decimales (ej. al clasificar la tasa de IVA, gravada = total / 1.1 no da un
+    número redondo). Un solo lugar para esta conversión — antes vivía duplicada como función
+    anidada acá (redefinida en cada fila procesada) y, aparte, como función propia en
+    compras_engine.py."""
+    s = f"{n:,.2f}"
+    return s.replace(",", "§").replace(".", ",").replace("§", ".")
 
 
 def _normalizar_tipo(s: str) -> str:
@@ -652,13 +662,6 @@ class IngestionEngine:
             elif total == 0 and estado.lower() != "anulada":
                 estado = "Anulada"
 
-            def _fmt(n: float) -> str:
-                # Sin redondear a entero: se muestra tal como viene calculado del Excel, con
-                # decimales (ej. al clasificar la tasa de IVA, gravada = total / 1.1 no da un
-                # número redondo). Formato es-PY: punto de miles, coma decimal.
-                s = f"{n:,.2f}"
-                return s.replace(",", "§").replace(".", ",").replace("§", ".")
-
             processed_rows.append({
                 "doc": doc,
                 "sistema": profile["name"],
@@ -667,12 +670,12 @@ class IngestionEngine:
                 "fecha_iso": fecha_iso,
                 "ruc": ruc,
                 "nombre": nombre,
-                "gravadas": _fmt(gravada),
-                "iva": _fmt(iva),
-                "gravadas_5": _fmt(gravada_5),
-                "iva_5": _fmt(iva_5),
-                "exentas": _fmt(exenta),
-                "total": _fmt(total),
+                "gravadas": fmt_gs(gravada),
+                "iva": fmt_gs(iva),
+                "gravadas_5": fmt_gs(gravada_5),
+                "iva_5": fmt_gs(iva_5),
+                "exentas": fmt_gs(exenta),
+                "total": fmt_gs(total),
                 "gravadas_num": gravada,
                 "iva_num": iva,
                 "gravadas_5_num": gravada_5,

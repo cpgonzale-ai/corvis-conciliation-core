@@ -7,22 +7,13 @@ local corresponde cada comprobante del libro de ventas en el Paso 2."""
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.core.audit import log_evento as _log_evento
 from app.core.deps import get_current_user, require_permission
 from app.db.database import get_db
-from app.db.models import EventoAuditoria, Local, Usuario
+from app.db.models import Local, Usuario
 from app.schemas.auth import LocalCreate, LocalOut, LocalUpdate
 
 router = APIRouter(prefix="/api/locales", tags=["locales"])
-
-
-def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, detalle: dict | None = None):
-    db.add(EventoAuditoria(
-        usuario_id=usuario_id,
-        accion=accion,
-        detalle=detalle,
-        ip_origen=request.client.host if request.client else None,
-    ))
-    db.commit()
 
 
 def _validar_unicidad(

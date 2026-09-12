@@ -39,6 +39,7 @@ from app.core.engine import (
     _usecols_para_perfil,
     clean_numeric,
     fix_mojibake,
+    fmt_gs as _fmt,
     normalize_invoice_number,
     tipo_doc_display,
 )
@@ -64,11 +65,6 @@ def _split_ruc_dv(raw: Any) -> Tuple[str, str]:
     return s, ""
 
 
-def _fmt(n: float) -> str:
-    # Formato es-PY (punto de miles, coma decimal), sin redondear — mismo criterio que el
-    # libro de ventas.
-    s = f"{n:,.2f}"
-    return s.replace(",", "§").replace(".", ",").replace("§", ".")
 
 
 def _texto_identificador(val: Any) -> str:

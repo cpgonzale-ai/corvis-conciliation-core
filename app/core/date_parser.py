@@ -1,29 +1,30 @@
 """
-Date Parser Module for SISCOM RG90.
-Handles heterogeneous date inputs (Excel serial floats/integers, DD/MM/YYYY, YYYY-MM-DD, timestamps)
-and converts them into standard YYYY-MM-DD strings and DD/MM/YYYY formatted output.
+Parseo de fechas para SISCOM RG90.
+Maneja los formatos heterogéneos con los que llegan las fechas en los distintos reportes
+(seriales de Excel en float/int, DD/MM/YYYY, YYYY-MM-DD, timestamps con hora) y los convierte
+a un string YYYY-MM-DD estándar internamente, más un formato DD/MM/YYYY para mostrar en la
+interfaz.
 """
 
 from datetime import datetime, date
 import xlrd
 from typing import Optional, Union
 
-EXCEL_EPOCH = datetime(1899, 12, 30)
 
 def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
     if value is None or str(value).strip() == "" or str(value).strip().lower() in ["nan", "null", "none", "—"]:
         return None
 
-    # Handle datetime / date objects
+    # Objetos datetime/date ya parseados por pandas
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d")
     if isinstance(value, date):
         return value.strftime("%Y-%m-%d")
 
-    # Handle Excel float/integer serial dates (e.g. 46144 or 46144.0)
+    # Serial de fecha de Excel como número (ej. 46144 o 46144.0)
     if isinstance(value, (int, float)):
         try:
-            # Check if within valid Excel serial range (e.g. 30000 to 60000)
+            # Rango válido de seriales de Excel para las fechas que maneja el sistema (ej. 30000 a 60000)
             if 10000 <= value <= 80000:
                 dt_tuple = xlrd.xldate_as_tuple(value, 0)
                 dt = datetime(*dt_tuple[:3])
@@ -33,7 +34,7 @@ def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
 
     s_val = str(value).strip()
 
-    # Try numeric string Excel float (e.g. "46144.0")
+    # Serial de Excel como string numérico (ej. "46144.0")
     try:
         f_val = float(s_val)
         if 10000 <= f_val <= 80000:
@@ -43,7 +44,7 @@ def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
     except ValueError:
         pass
 
-    # Clean string timestamps (e.g. "01/06/2026 00:00:00")
+    # Timestamps con hora incluida (ej. "01/06/2026 00:00:00") — se descarta la hora
     if " " in s_val:
         s_val = s_val.split(" ")[0]
 
@@ -66,7 +67,7 @@ def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
     return None
 
 def format_display_date(iso_date_str: Optional[str]) -> str:
-    """Converts YYYY-MM-DD to DD/MM/YYYY for UI display."""
+    """Convierte de YYYY-MM-DD a DD/MM/YYYY para mostrar en la interfaz."""
     if not iso_date_str:
         return "—"
     try:

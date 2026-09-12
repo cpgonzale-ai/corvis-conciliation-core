@@ -18,11 +18,12 @@ from app.api.auth import router as auth_router
 from app.api.compras import router as compras_router
 from app.api.locales import router as locales_router
 from app.api.roles import router as roles_router
+from app.core.audit import log_evento as _log_evento
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90
 from app.db.database import get_db
-from app.db.models import ArchivoProcesado, EventoAuditoria, LoteProcesamiento, ResultadoRG90, Usuario
+from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Usuario
 
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "profiles")
 engine = IngestionEngine(PROFILES_DIR)
@@ -65,17 +66,6 @@ app.include_router(compras_router)
 app.include_router(locales_router)
 app.include_router(roles_router)
 app.include_router(auditoria_router)
-
-
-def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, lote_id: Optional[int] = None, detalle: Optional[dict] = None):
-    db.add(EventoAuditoria(
-        usuario_id=usuario_id,
-        accion=accion,
-        lote_id=lote_id,
-        detalle=detalle,
-        ip_origen=request.client.host if request.client else None,
-    ))
-    db.commit()
 
 
 @app.get("/api/health")

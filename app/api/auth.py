@@ -4,24 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
+from app.core.audit import log_evento as _log_evento
 from app.core.deps import get_current_user, require_permission
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.database import get_db
-from app.db.models import EventoAuditoria, Rol, Usuario
+from app.db.models import Rol, Usuario
 from app.schemas.auth import MeOut, TokenResponse, UsuarioCreate, UsuarioOut, UsuarioUpdate
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-
-def _log_evento(db: Session, usuario_id: int, accion: str, request: Request | None = None, detalle: dict | None = None):
-    evento = EventoAuditoria(
-        usuario_id=usuario_id,
-        accion=accion,
-        detalle=detalle,
-        ip_origen=request.client.host if request and request.client else None,
-    )
-    db.add(evento)
-    db.commit()
 
 
 @router.post("/login", response_model=TokenResponse)

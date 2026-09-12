@@ -13,11 +13,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy.orm import Session
 
+from app.core.audit import log_evento as _log_evento
 from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg
 from app.core.engine import detect_sequence_gaps
 from app.core.deps import get_current_user
 from app.db.database import get_db
-from app.db.models import ArchivoProcesado, EventoAuditoria, LoteProcesamiento, ResultadoRG90, Usuario
+from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Usuario
 
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "profiles")
 engine = ComprasEngine(PROFILES_DIR)
@@ -28,17 +29,6 @@ engine = ComprasEngine(PROFILES_DIR)
 FORM_MAX_PART_SIZE = 80 * 1024 * 1024
 
 router = APIRouter(prefix="/api/compras", tags=["compras"])
-
-
-def _log_evento(db: Session, usuario_id: int, accion: str, request: Request, lote_id: Optional[int] = None, detalle: Optional[dict] = None):
-    db.add(EventoAuditoria(
-        usuario_id=usuario_id,
-        accion=accion,
-        lote_id=lote_id,
-        detalle=detalle,
-        ip_origen=request.client.host if request.client else None,
-    ))
-    db.commit()
 
 
 @router.post("/ingest")
