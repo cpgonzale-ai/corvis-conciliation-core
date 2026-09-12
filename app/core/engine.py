@@ -287,6 +287,17 @@ def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _nombres_columnas_perfil(profile: Dict) -> Optional[set]:
+    """Nombres de columna que el perfil realmente mapea (source_name), o None si el perfil
+    mezcla mapeo por posición (source_col, ej. Aloha/Hiopos) — ahí no se puede saber de
+    antemano qué nombre corresponde a cada posición sin leer el archivo primero."""
+    mappings = profile.get("column_mappings", [])
+    nombres = [m.get("source_name") for m in mappings if "source_name" in m]
+    if not mappings or len(nombres) != len(mappings):
+        return None
+    return set(nombres)
+
+
 def _usecols_para_perfil(profile: Dict) -> Optional[Any]:
     """Devuelve un filtro de columnas para pasarle a pd.read_excel/read_csv, cuando el
     perfil lo permite, para no leer columnas que no se van a usar.
@@ -302,17 +313,10 @@ def _usecols_para_perfil(profile: Dict) -> Optional[Any]:
     haga fallar la lectura entera (usecols=[lista] tira ValueError si algún nombre no
     aparece; usecols=callable simplemente no la incluye) — mismo criterio tolerante que ya
     usa _process_dataframe con `df[c_name] if c_name in df.columns else ...`.
-
-    Solo aplica cuando TODAS las columnas del perfil se mapean por nombre (source_name);
-    perfiles que mezclan mapeo por posición (source_col, ej. Aloha/Hiopos) devuelven None
-    (sin optimizar) porque ahí no se puede saber de antemano qué nombre de columna
-    corresponde a cada posición sin leer el archivo primero.
     """
-    mappings = profile.get("column_mappings", [])
-    nombres = [m.get("source_name") for m in mappings if "source_name" in m]
-    if not mappings or len(nombres) != len(mappings):
+    nombres_set = _nombres_columnas_perfil(profile)
+    if nombres_set is None:
         return None
-    nombres_set = set(nombres)
     return lambda c: c in nombres_set
 
 
@@ -435,11 +439,28 @@ class IngestionEngine:
             candidatos += [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet and i not in candidatos]
 
         usecols = _usecols_para_perfil(profile)
+        nombres_esperados = _nombres_columnas_perfil(profile)
         rows: List[Dict[str, Any]] = []
         cortes: List[Dict[str, Any]] = []
         for idx in candidatos:
             if idx >= len(sheet_names):
                 continue
+
+            # Con más de un candidato (ej. un archivo con varias hojas y ninguna
+            # prefer_sheet_name configurada), antes de leer la hoja completa se espía
+            # apenas el encabezado: si ninguna columna que el perfil espera está presente,
+            # se descarta sin gastar tiempo en la lectura completa. Confirmado sobre un
+            # archivo real de ~98.000 filas con una hoja de control (sin relación con la
+            # RG90) antes de la hoja real: sin este chequeo, la hoja de control —igual de
+            # grande— se leía entera (40 s) solo para descartarla después.
+            if len(candidatos) > 1 and nombres_esperados is not None:
+                try:
+                    hdr_df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, nrows=0)
+                except Exception:
+                    hdr_df = None
+                if hdr_df is not None and not (set(hdr_df.columns) & nombres_esperados):
+                    continue
+
             df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, usecols=usecols)
             df = _repair_embedded_rows(df)
             rows, cortes = self._process_dataframe(df, profile, local_name)
