@@ -86,13 +86,16 @@ def _titulo_es(s: str) -> str:
 
 
 
-# Tipos de Comprobante oficiales del SET (Cuadro de Tipos de Comprobante de la RG 90),
-# además de Factura y Nota de Crédito que ya tienen su propio branch en tipo_doc_display —
-# estos se muestran tal como vienen del archivo. El resto de los perfiles usa el mismo campo
-# "tipo_documento"/"tipo_comprobante" con otro propósito: Hiopos, por ejemplo, lo usa como
-# subtipo interno del POS solo para filtrar filas ("Factura venta", "Abono factura venta
-# simplificada"), no como la clasificación legal del comprobante — mostrar eso tal cual
-# rompería el badge Factura/Nota de Crédito que el resto del sistema ya asume.
+# Tipos de Comprobante oficiales del SET, según el documento del cliente "Tipo de
+# Documentos RG -libros.xlsx": los válidos para Ventas (Factura, Nota de Crédito, Nota de
+# Débito — únicos 3 marcados en verde ahí) más los que solo aplican a Compras (el resto de
+# la hoja, incluidos los clasificados ahí como Ingresos/Egresos, que la columna D marca
+# igual como válidos para Compras). Se muestran con el texto tal como vino del archivo, con
+# mayúsculas iniciales. El resto de los perfiles usa el mismo campo "tipo_documento"/
+# "tipo_comprobante" con otro propósito: Hiopos, por ejemplo, lo usa como subtipo interno
+# del POS solo para filtrar filas ("Factura venta", "Abono factura venta simplificada"), no
+# como la clasificación legal del comprobante — mostrar eso tal cual rompería el badge
+# Factura/Nota de Crédito que el resto del sistema ya asume.
 _TIPOS_COMPROBANTE_SET_EXTRA = {
     _normalizar_tipo(t) for t in [
         "AUTOFACTURA",
@@ -103,34 +106,55 @@ _TIPOS_COMPROBANTE_SET_EXTRA = {
         "BOLETO O TICKET DE TRANSPORTE AÉREO",
         "DESPACHO DE IMPORTACIÓN",
         "ENTRADA A ESPECTÁCULOS PÚBLICOS",
-        "NOTA DE DÉBITO",
         "TICKET MÁQUINA REGISTRADORA",
+        "COMPROBANTE DE EGRESOS POR COMPRAS A CRÉDITO",
+        "COMPROBANTE DEL EXTERIOR LEGALIZADO",
+        "COMPROBANTE DE INGRESO POR VENTAS A CRÉDITO",
+        "COMPROBANTE DE INGRESOS ENTIDADES PÚBLICAS, RELIGIOSAS O DE BENEFICIO PÚBLICO",
+        "EXTRACTO DE CUENTA – BILLETAJE ELECTRÓNICO",
+        "EXTRACTO DE CUENTA DE IPS",
+        "EXTRACTO DE CUENTA TC/TD",
+        "LIQUIDACIÓN DE SALARIO",
+        "OTROS COMPROBANTES DE EGRESOS",
+        "OTROS COMPROBANTES DE INGRESOS",
+        "TRANSFERENCIAS O GIROS BANCARIOS/ BOLETA DE DEPÓSITO",
     ]
 }
 
-
-_NORM_NOTA_CREDITO = _normalizar_tipo("NOTA DE CREDITO")
-_NORM_FACTURA = _normalizar_tipo("FACTURA")
+# Variantes que se consideran el mismo comprobante que su base en papel (solo cambia el
+# medio de emisión: electrónico/virtual) — mismo criterio confirmado por el cliente sobre
+# el documento "Tipo de Documentos RG -libros.xlsx": FACTURA VIRTUAL/FACTURA ELECTRONICA se
+# tratan como Factura, NOTA DE CRÉDITO ELECTRONICA como Nota de Crédito, NOTA DE DÉBITO
+# ELECTRONICA como Nota de Débito. Se colapsan al mismo texto — no solo para mostrarlo
+# igual, sino porque detect_sequence_gaps agrupa la numeración por (local, serie, tipo_doc):
+# tratarlas como un tipo aparte partiría en dos una numeración que en la práctica es una
+# sola secuencia por punto de expedición.
+_ALIASES_FACTURA = {_normalizar_tipo(t) for t in ["FACTURA", "FACTURA VIRTUAL", "FACTURA ELECTRONICA"]}
+_ALIASES_NOTA_CREDITO = {_normalizar_tipo(t) for t in ["NOTA DE CRÉDITO", "NOTA DE CRÉDITO ELECTRONICA"]}
+_ALIASES_NOTA_DEBITO = {_normalizar_tipo(t) for t in ["NOTA DE DÉBITO", "NOTA DE DÉBITO ELECTRONICA"]}
 
 
 def tipo_doc_display(tipo_doc_raw: str, es_credito: bool) -> str:
-    """Etiqueta de tipo de comprobante para la grilla. Factura y Nota de Crédito siempre se
-    muestran con su ortografía canónica (acentuada), sin importar cómo los haya escrito el
-    archivo de origen. Los demás tipos de comprobante oficiales del SET (Boleta de Venta,
-    Nota de Débito, Ticket Máquina Registradora, Autofactura, etc. — ver
-    _TIPOS_COMPROBANTE_SET_EXTRA) se muestran con el texto tal como vino del archivo, con
-    mayúsculas iniciales. Cualquier otro valor (subtipos internos del sistema de origen que
-    no son parte de esta clasificación legal, ej. Hiopos) cae al binario Factura/Nota de
-    Crédito de siempre, inferido por es_credito. (Las constantes _NORM_* se calculan una
-    sola vez al importar el módulo — esta función se llama una vez por fila del libro, y
-    con archivos reales de decenas de miles de filas recalcularlas en cada llamada es un
-    costo innecesario que se nota.)"""
+    """Etiqueta de tipo de comprobante para la grilla. Factura, Nota de Crédito y Nota de
+    Débito (y sus variantes electrónica/virtual — ver _ALIASES_*) siempre se muestran con su
+    ortografía canónica (acentuada), sin importar cómo los haya escrito el archivo de
+    origen. Los demás tipos de comprobante oficiales del SET (Boleta de Venta, Ticket
+    Máquina Registradora, Autofactura, etc. — ver _TIPOS_COMPROBANTE_SET_EXTRA, todos
+    Compras-only) se muestran con el texto tal como vino del archivo, con mayúsculas
+    iniciales. Cualquier otro valor (subtipos internos del sistema de origen que no son
+    parte de esta clasificación legal, ej. Hiopos) cae al binario Factura/Nota de Crédito
+    de siempre, inferido por es_credito. (Los sets _ALIASES_*/_TIPOS_COMPROBANTE_SET_EXTRA
+    se calculan una sola vez al importar el módulo — esta función se llama una vez por fila
+    del libro, y con archivos reales de decenas de miles de filas recalcularlas en cada
+    llamada es un costo innecesario que se nota.)"""
     if tipo_doc_raw:
         norm = _normalizar_tipo(tipo_doc_raw)
-        if norm == _NORM_NOTA_CREDITO:
-            return "Nota de Crédito"
-        if norm == _NORM_FACTURA:
+        if norm in _ALIASES_FACTURA:
             return "Factura"
+        if norm in _ALIASES_NOTA_CREDITO:
+            return "Nota de Crédito"
+        if norm in _ALIASES_NOTA_DEBITO:
+            return "Nota de Débito"
         if norm in _TIPOS_COMPROBANTE_SET_EXTRA:
             return _titulo_es(tipo_doc_raw)
     return "Nota de Crédito" if es_credito else "Factura"

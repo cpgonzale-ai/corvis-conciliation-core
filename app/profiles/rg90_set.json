@@ -20,19 +20,17 @@
   "filter_rules": [
     {"field": "numero_comprobante", "operator": "not_empty"}
   ],
-  "_comentario_tipos": "Tipos de Comprobante del SET que corresponden al régimen de Ventas (Cuadro de Tipos de Comprobante de la RG 90) — el resto se descarta. La comparación ignora tildes/mayúsculas (ver _normalizar_tipo en engine.py).",
+  "_comentario_tipos": "Tipos de Comprobante válidos para Ventas según el documento del cliente 'Tipo de Documentos RG -libros.xlsx' (los únicos 3 marcados en verde ahí, con sus variantes electrónica/virtual) — el resto son Compras-only y se descartan acá. La comparación ignora tildes/mayúsculas (ver _normalizar_tipo en engine.py).",
   "tipo_documento_permitidos": [
-    "BOLETA DE TRANSPORTE PÚBLICO DE PASAJEROS",
-    "BOLETA DE VENTA",
-    "BOLETOS DE LOTERÍAS, JUEGOS DE AZAR",
-    "BOLETO O TICKET DE TRANSPORTE AÉREO",
-    "ENTRADA A ESPECTÁCULOS PÚBLICOS",
     "FACTURA",
+    "FACTURA VIRTUAL",
+    "FACTURA ELECTRONICA",
     "NOTA DE CRÉDITO",
+    "NOTA DE CRÉDITO ELECTRONICA",
     "NOTA DE DÉBITO",
-    "TICKET MÁQUINA REGISTRADORA"
+    "NOTA DE DÉBITO ELECTRONICA"
   ],
-  "tipo_documento_notas_credito": ["NOTA DE CRÉDITO"],
+  "tipo_documento_notas_credito": ["NOTA DE CRÉDITO", "NOTA DE CRÉDITO ELECTRONICA"],
   "defaults": {
     "ruc_null_fallback": "X",
     "nombre_null_fallback": "SIN NOMBRE"

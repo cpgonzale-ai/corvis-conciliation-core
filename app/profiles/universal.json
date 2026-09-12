@@ -7,8 +7,17 @@
   "prefer_sheet_name": "Formato Universal- LIBRO VENTAS",
   "require_exact_sheet_name": true,
   "signature_columns": ["FECHA", "TIPO", "N° DOCUMENTO", "R. SOCIAL/APELLIDO/NOMBRE", "RUC", "GRAV 10%", "CONDICION"],
-  "tipo_documento_permitidos": ["FACTURA", "NOTA DE CREDITO"],
-  "tipo_documento_notas_credito": ["NOTA DE CREDITO"],
+  "_comentario_tipos": "Mismo criterio que rg90_set.json: solo los 3 tipos marcados en verde para Ventas en 'Tipo de Documentos RG -libros.xlsx', con sus variantes electrónica/virtual.",
+  "tipo_documento_permitidos": [
+    "FACTURA",
+    "FACTURA VIRTUAL",
+    "FACTURA ELECTRONICA",
+    "NOTA DE CRÉDITO",
+    "NOTA DE CRÉDITO ELECTRONICA",
+    "NOTA DE DÉBITO",
+    "NOTA DE DÉBITO ELECTRONICA"
+  ],
+  "tipo_documento_notas_credito": ["NOTA DE CRÉDITO", "NOTA DE CRÉDITO ELECTRONICA"],
   "column_mappings": [
     {"source_name": "FECHA", "target_field": "fecha"},
     {"source_name": "TIPO", "target_field": "tipo_documento"},

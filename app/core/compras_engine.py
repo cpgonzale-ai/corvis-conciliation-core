@@ -44,8 +44,10 @@ from app.core.engine import (
 )
 
 # Códigos de nota de crédito del sistema origen ("NC", "NCE") + el texto largo tal como lo
-# imprime la RG ("NOTA DE CRÉDITO") — cubre ambos formatos con la misma comparación.
-_MARCADORES_NC = ("NC", "NCE", "NOTA DE CRÉDITO", "NOTA DE CREDITO")
+# imprime la RG ("NOTA DE CRÉDITO"), incluida la variante electrónica del documento del
+# cliente ("Tipo de Documentos RG -libros.xlsx") — cubre todos los formatos con la misma
+# comparación.
+_MARCADORES_NC = ("NC", "NCE", "NOTA DE CRÉDITO", "NOTA DE CREDITO", "NOTA DE CRÉDITO ELECTRONICA", "NOTA DE CREDITO ELECTRONICA")
 
 
 def _split_ruc_dv(raw: Any) -> Tuple[str, str]:
