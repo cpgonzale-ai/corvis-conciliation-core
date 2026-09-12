@@ -136,7 +136,9 @@ async def reconcile_compras(
     no_en_rg = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
     no_en_libro = len([d for d in diffs if d["diferencia"] == "No en libro propio"])
     diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
-    coinciden = max(0, len(pos_rows) - no_en_rg - diferencia_monto)
+    # Ahora que reconcile_compras_with_rg informa "Coincide" como categoría real (antes no
+    # guardaba nada para esos comprobantes), se cuenta directo en vez de por resta.
+    coinciden = len([d for d in diffs if d["diferencia"] == "Coincide"])
 
     lote = db.get(LoteProcesamiento, lote_id) if lote_id else None
     if lote is None:

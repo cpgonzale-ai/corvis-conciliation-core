@@ -258,7 +258,10 @@ async def reconcile(
         saltos = len([d for d in diffs if d["diferencia"] == "Salto de numeración"])
         anuladas = len([d for d in diffs if d["diferencia"] == "Anulada"])
         diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
-        coinciden = max(0, len(pos_rows) - no_en_rg90 - diferencia_monto - anuladas)
+        # Antes se calculaba por resta (total del libro menos el resto de las categorías),
+        # lo que además contaba de más las "Rechazada" (nunca se restaban) — ahora que
+        # reconcile_with_rg90 informa "Coincide" como una categoría real, se cuenta directo.
+        coinciden = len([d for d in diffs if d["diferencia"] == "Coincide"])
 
         lote = db.get(LoteProcesamiento, lote_id) if lote_id else None
         if lote is None:

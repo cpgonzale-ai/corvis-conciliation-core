@@ -284,6 +284,19 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                     "diferencia": "Diferencia de monto",
                     "diferencias_detalle": campo_diffs,
                 })
+            else:
+                # Mismo criterio que reconcile_with_rg90: el comprobante coincide (mismo doc
+                # + RUC del proveedor en ambos lados, sin diferencia de monto) — antes no se
+                # guardaba nada acá y la tarjeta "Coinciden" no tenía filas reales detrás.
+                diffs.append({
+                    "doc": pos_rec["doc"],
+                    "proveedor": pos_rec["proveedor"],
+                    "sistema": pos_rec["sistema"],
+                    "local": pos_rec["local"],
+                    "libro": _lado_diff(pos_rec),
+                    "rg": _lado_diff(rg_rec),
+                    "diferencia": "Coincide",
+                })
 
     return diffs
 

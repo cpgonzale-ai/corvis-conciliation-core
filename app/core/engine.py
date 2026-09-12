@@ -834,6 +834,21 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Anulada"
                 })
+            else:
+                # El comprobante coincide (mismo doc en ambos lados, sin diferencia de
+                # monto ni motivo de descarte) — antes no se guardaba nada acá, así que la
+                # tarjeta "Coinciden" no tenía ninguna fila real detrás: se calculaba por
+                # resta (total - el resto de las categorías) y al presionarla no mostraba
+                # nada. Ahora queda como una categoría más de "diferencia", igual que las
+                # demás, para que el botón funcione igual que el resto de las tarjetas.
+                diffs.append({
+                    "doc": doc,
+                    "sistema": pos_rec["sistema"],
+                    "local": pos_rec["local"],
+                    "libro": _lado_diff_ventas(pos_rec),
+                    "rg90": _lado_diff_ventas(rg_rec),
+                    "diferencia": "Coincide"
+                })
 
     return diffs
 
