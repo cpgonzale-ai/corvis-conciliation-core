@@ -195,21 +195,42 @@ def fix_mojibake(s: str) -> str:
 
 
 def classify_tax_rate(gravada_bruta: float, iva_bruta: float) -> Tuple[float, float, float, float, float]:
-    """Clasifica un comprobante en 10%, 5% o exento probando `gravada * tasa - iva ≈ 0`
-    (Minutas de relevamiento 3 y 4). Devuelve (gravada_10, iva_10, gravada_5, iva_5, exenta).
-    """
-    if abs(iva_bruta) <= MONTO_TOLERANCE_CLASIFICACION:
-        return 0.0, 0.0, 0.0, 0.0, gravada_bruta
+    """Clasifica un comprobante en 10%, 5% o exento probando cuál de las tres hipótesis
+    (exento: iva ≈ 0 / gravada*10% ≈ iva / gravada*5% ≈ iva) ajusta MEJOR — no cuál es la
+    PRIMERA en pasar el umbral de tolerancia (Minutas de relevamiento 3 y 4). Devuelve
+    (gravada_10, iva_10, gravada_5, iva_5, exenta).
 
-    if abs(gravada_bruta * 0.10 - iva_bruta) <= MONTO_TOLERANCE_CLASIFICACION:
+    Antes se probaba en un orden fijo con "return" apenas una calzaba dentro de la
+    tolerancia — para una factura de importe grande eso no generaba ambigüedad (una
+    diferencia de hasta 0,6 Gs es insignificante frente a montos de miles/millones), pero
+    para una factura de muy pocos guaraníes (ej. gravada 3,64 / iva 0,36 — una factura real
+    al 10%, 3,64*10% = 0,364 ≈ 0,36) el propio IVA real cae dentro de esa misma tolerancia
+    de "¿es cero?" y la clasificaba como exenta, perdiendo la gravada real (mostraba 0 en vez
+    de 3,64). Confirmado sobre los 31 archivos Aloha reales de mayo/2026: 5 comprobantes con
+    este patrón, todos con total entre 1 y 4 guaraníes.
+
+    Comparar las tres diferencias y quedarse con la menor no tiene este problema: para ese
+    mismo caso, la diferencia contra "exento" es 0,36 pero contra "10%" es apenas 0,004 —
+    gana 10% con claridad. Y una factura exenta chica genuina (ej. gravada 0,50, iva 0,00)
+    sigue clasificando bien: diferencia contra "exento" es 0, contra "10%" es 0,05 — sigue
+    ganando exento.
+    """
+    diff_exento = abs(iva_bruta)
+    diff_10 = abs(gravada_bruta * 0.10 - iva_bruta)
+    diff_5 = abs(gravada_bruta * 0.05 - iva_bruta)
+    mejor = min(diff_exento, diff_10, diff_5)
+
+    if mejor > MONTO_TOLERANCE_CLASIFICACION:
+        # Ninguna tasa conocida calzó ni siquiera de forma aproximada: se conserva como
+        # gravada al 10% (caso más común) para no perder el registro, pero queda disponible
+        # para revisión manual vía el total.
         return gravada_bruta, iva_bruta, 0.0, 0.0, 0.0
 
-    if abs(gravada_bruta * 0.05 - iva_bruta) <= MONTO_TOLERANCE_CLASIFICACION:
-        return 0.0, 0.0, gravada_bruta, iva_bruta, 0.0
-
-    # Ninguna tasa conocida calzó: se conserva como gravada al 10% (caso más común) para no
-    # perder el registro, pero queda disponible para revisión manual vía el total.
-    return gravada_bruta, iva_bruta, 0.0, 0.0, 0.0
+    if mejor == diff_exento:
+        return 0.0, 0.0, 0.0, 0.0, gravada_bruta
+    if mejor == diff_10:
+        return gravada_bruta, iva_bruta, 0.0, 0.0, 0.0
+    return 0.0, 0.0, gravada_bruta, iva_bruta, 0.0
 
 
 def _extract_corte(raw_row: List[Any], seccion: str) -> Optional[Dict[str, Any]]:
