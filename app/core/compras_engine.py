@@ -247,6 +247,7 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
         if pos_rec and not rg_rec:
             diffs.append({
                 "doc": pos_rec["doc"],
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "proveedor": pos_rec["proveedor"],
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
@@ -257,6 +258,7 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
         elif rg_rec and not pos_rec:
             diffs.append({
                 "doc": rg_rec["doc"],
+                "tipo_doc": rg_rec.get("tipo_doc", ""),
                 "proveedor": rg_rec["proveedor"],
                 "sistema": rg_rec.get("sistema", "RG"),
                 "local": rg_rec.get("local", "Desconocido"),
@@ -276,6 +278,7 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
             if campo_diffs:
                 diffs.append({
                     "doc": pos_rec["doc"],
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "proveedor": pos_rec["proveedor"],
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
@@ -290,6 +293,7 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                 # guardaba nada acá y la tarjeta "Coinciden" no tenía filas reales detrás.
                 diffs.append({
                     "doc": pos_rec["doc"],
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "proveedor": pos_rec["proveedor"],
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
