@@ -824,6 +824,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 # archivos reales: 81 de 657 anuladas en Aloha Sheraton, ninguna en RG90).
                 diffs.append({
                     "doc": doc,
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
                     "libro": _lado_diff_ventas(pos_rec),
@@ -833,6 +834,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 continue
             diffs.append({
                 "doc": doc,
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
                 "libro": _lado_diff_ventas(pos_rec),
@@ -842,6 +844,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
         elif rg_rec and not pos_rec:
             diffs.append({
                 "doc": doc,
+                "tipo_doc": rg_rec.get("tipo_doc", ""),
                 "sistema": rg_rec.get("sistema", "RG90"),
                 "local": rg_rec.get("local", "Desconocido"),
                 "libro": _lado_diff_ventas(None),
@@ -864,6 +867,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
             if campo_diffs:
                 diffs.append({
                     "doc": doc,
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
                     "libro": _lado_diff_ventas(pos_rec),
@@ -874,6 +878,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
             elif rg_rec.get("estado", "").lower() == "rechazada":
                 diffs.append({
                     "doc": doc,
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
                     "libro": _lado_diff_ventas(pos_rec),
@@ -883,6 +888,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
             elif pos_rec["estado"].lower() == "anulada" or rg_rec.get("estado", "").lower() == "anulada":
                 diffs.append({
                     "doc": doc,
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
                     "libro": _lado_diff_ventas(pos_rec),
@@ -898,6 +904,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 # demás, para que el botón funcione igual que el resto de las tarjetas.
                 diffs.append({
                     "doc": doc,
+                    "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
                     "local": pos_rec["local"],
                     "libro": _lado_diff_ventas(pos_rec),
