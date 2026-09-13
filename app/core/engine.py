@@ -11,9 +11,21 @@ import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 from app.core.date_parser import parse_date, format_display_date
 
-# Tolerancia para comparaciones de montos (evita falsos positivos por decimales periódicos
-# al dividir gravada = total / 1.1, tal como se ve en los archivos reales del cliente).
-MONTO_TOLERANCE = 0.6
+# Dos tolerancias separadas — antes era una sola (MONTO_TOLERANCE) usada para dos cosas
+# distintas, lo que hacía que no se pudiera ajustar una sin afectar la otra:
+#
+# - Clasificación de tasa de IVA al ingerir un archivo (classify_tax_rate): evita falsos
+#   negativos por decimales periódicos al dividir gravada = total / 1.1 o / 1.05 (tal como
+#   se ve en los archivos reales del cliente) — si esto se pone en 0, un comprobante real
+#   con una fracción de guaraní de diferencia entre gravada*tasa e iva deja de matchear
+#   ninguna tasa conocida y cae en la clasificación por defecto (10%), un error de datos
+#   silencioso. Se mantiene en 0,6.
+MONTO_TOLERANCE_CLASIFICACION = 0.6
+
+# - Comparación de montos en el resultado (Paso 3 de Compras / Paso 4 de Ventas): decide si
+#   una diferencia entre el libro propio y la RG es lo bastante grande como para mostrarse.
+#   En 0, cualquier diferencia post-redondeo a 2 decimales se marca (no tolera nada).
+MONTO_TOLERANCE_DIFERENCIA = 0.0
 
 DOC_PATTERN = re.compile(r"^(NC)?\d{3}-\d{3}-\d{7}$")
 SERIE_PATTERN = re.compile(r"^(NC)?\d{3}-\d{3}$")
@@ -186,13 +198,13 @@ def classify_tax_rate(gravada_bruta: float, iva_bruta: float) -> Tuple[float, fl
     """Clasifica un comprobante en 10%, 5% o exento probando `gravada * tasa - iva ≈ 0`
     (Minutas de relevamiento 3 y 4). Devuelve (gravada_10, iva_10, gravada_5, iva_5, exenta).
     """
-    if abs(iva_bruta) <= MONTO_TOLERANCE:
+    if abs(iva_bruta) <= MONTO_TOLERANCE_CLASIFICACION:
         return 0.0, 0.0, 0.0, 0.0, gravada_bruta
 
-    if abs(gravada_bruta * 0.10 - iva_bruta) <= MONTO_TOLERANCE:
+    if abs(gravada_bruta * 0.10 - iva_bruta) <= MONTO_TOLERANCE_CLASIFICACION:
         return gravada_bruta, iva_bruta, 0.0, 0.0, 0.0
 
-    if abs(gravada_bruta * 0.05 - iva_bruta) <= MONTO_TOLERANCE:
+    if abs(gravada_bruta * 0.05 - iva_bruta) <= MONTO_TOLERANCE_CLASIFICACION:
         return 0.0, 0.0, gravada_bruta, iva_bruta, 0.0
 
     # Ninguna tasa conocida calzó: se conserva como gravada al 10% (caso más común) para no
@@ -762,7 +774,7 @@ def detect_sequence_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _monto_diff(a: float, b: float) -> Optional[float]:
     diff = round(a - b, 2)
-    return None if abs(diff) <= MONTO_TOLERANCE else diff
+    return None if abs(diff) <= MONTO_TOLERANCE_DIFERENCIA else diff
 
 
 def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
