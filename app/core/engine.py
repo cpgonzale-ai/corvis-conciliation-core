@@ -19,8 +19,9 @@ from app.core.date_parser import parse_date, format_display_date
 #   se ve en los archivos reales del cliente) — si esto se pone en 0, un comprobante real
 #   con una fracción de guaraní de diferencia entre gravada*tasa e iva deja de matchear
 #   ninguna tasa conocida y cae en la clasificación por defecto (10%), un error de datos
-#   silencioso. Se mantiene en 0,6.
-MONTO_TOLERANCE_CLASIFICACION = 0.6
+#   silencioso. Valor definido por la regla de negocio del cliente ("cercano a 0,
+#   aproximadamente 0,5 por redondeo").
+MONTO_TOLERANCE_CLASIFICACION = 0.5
 
 # - Comparación de montos en el resultado (Paso 3 de Compras / Paso 4 de Ventas): decide si
 #   una diferencia entre el libro propio y la RG es lo bastante grande como para mostrarse.
