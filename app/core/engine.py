@@ -23,10 +23,11 @@ from app.core.date_parser import parse_date, format_display_date
 #   aproximadamente 0,5 por redondeo").
 MONTO_TOLERANCE_CLASIFICACION = 0.5
 
-# - Comparación de montos en el resultado (Paso 3 de Compras / Paso 4 de Ventas): decide si
-#   una diferencia entre el libro propio y la RG es lo bastante grande como para mostrarse.
-#   En 0, cualquier diferencia post-redondeo a 2 decimales se marca (no tolera nada).
-MONTO_TOLERANCE_DIFERENCIA = 0.0
+# - Comparación de montos en el resultado (Paso 3 de Compras / Paso 4 de Ventas, mismo valor
+#   para los dos): decide si una diferencia entre el libro propio y la RG es lo bastante
+#   grande como para mostrarse. Definida por el cliente en 100 Gs — una diferencia de hasta
+#   100 Gs no se marca.
+MONTO_TOLERANCE_DIFERENCIA = 100.0
 
 DOC_PATTERN = re.compile(r"^(NC)?\d{3}-\d{3}-\d{7}$")
 SERIE_PATTERN = re.compile(r"^(NC)?\d{3}-\d{3}$")
