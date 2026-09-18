@@ -6,7 +6,6 @@ motor en vez de reusar el de ventas."""
 import asyncio
 import json
 import os
-import shutil
 import tempfile
 from typing import List, Optional
 
@@ -17,6 +16,7 @@ from app.core.audit import log_evento as _log_evento
 from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg
 from app.core.engine import detect_sequence_gaps
 from app.core.deps import get_current_user
+from app.core.uploads import guardar_archivo_seguro
 from app.db.database import get_db
 from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Usuario
 
@@ -45,9 +45,7 @@ async def ingest_compras(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for file in files:
-            tmp_path = os.path.join(tmp_dir, file.filename)
-            with open(tmp_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            tmp_path = await guardar_archivo_seguro(file, tmp_dir)
             # Auto-detección de formato: primero se intenta el export del sistema
             # habitual (compras_sistema); si la firma de columnas no coincide, se
             # reintenta con el Formato Universal (Minuta) antes de fallar.
@@ -113,9 +111,7 @@ async def reconcile_compras(
     loop = asyncio.get_event_loop()
     with tempfile.TemporaryDirectory() as tmp_dir:
         for rg_file in rg_files:
-            tmp_path = os.path.join(tmp_dir, rg_file.filename)
-            with open(tmp_path, "wb") as buffer:
-                shutil.copyfileobj(rg_file.file, buffer)
+            tmp_path = await guardar_archivo_seguro(rg_file, tmp_dir)
             try:
                 file_rows = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "rg_compras", "RG")
             except ValueError as e:

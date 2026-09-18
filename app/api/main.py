@@ -5,7 +5,6 @@ Provides endpoints for profile management, file ingestion, sequence gap detectio
 
 import asyncio
 import os
-import shutil
 import tempfile
 from typing import List, Optional
 
@@ -22,6 +21,7 @@ from app.core.audit import log_evento as _log_evento
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90
+from app.core.uploads import guardar_archivo_seguro
 from app.db.database import get_db
 from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Usuario
 
@@ -104,9 +104,7 @@ async def ingest_files(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for file in files:
-            tmp_path = os.path.join(tmp_dir, file.filename)
-            with open(tmp_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            tmp_path = await guardar_archivo_seguro(file, tmp_dir)
 
             # engine.ingest_file (pandas/xlrd) es trabajo sincrónico y puede tardar varios
             # segundos por archivo — se corre en un thread aparte para no bloquear el event
@@ -223,9 +221,7 @@ async def reconcile(
         loop = asyncio.get_event_loop()
         with tempfile.TemporaryDirectory() as tmp_dir:
             for rg90_file in rg90_files:
-                tmp_path = os.path.join(tmp_dir, rg90_file.filename)
-                with open(tmp_path, "wb") as buffer:
-                    shutil.copyfileobj(rg90_file.file, buffer)
+                tmp_path = await guardar_archivo_seguro(rg90_file, tmp_dir)
                 # Mismo criterio que /api/compras/reconcile: un archivo que no corresponde
                 # al formato de la RG90 (firma no encontrada, hoja inesperada, etc.) no debe
                 # tumbar el pedido entero con un 500 genérico — se informa qué archivo falló
