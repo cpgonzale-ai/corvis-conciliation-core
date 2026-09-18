@@ -347,12 +347,24 @@ def _usecols_para_perfil(profile: Dict) -> Optional[Any]:
     """Devuelve un filtro de columnas para pasarle a pd.read_excel/read_csv, cuando el
     perfil lo permite, para no leer columnas que no se van a usar.
 
-    Confirmado sobre un archivo real de la RG90 ("SOLO VENTAS MAYO 2026.xls", 31 MB): tiene
-    formato aplicado a las 65.536 filas × 256 columnas máximas de un .xls (aunque los datos
-    reales ocupen una fracción), y con xlrd cada una de esas ~16,7 millones de celdas se
-    procesa en Python puro — pandas tardaba más de 4 minutos en leerlo completo. Reducido a
-    solo las columnas que el perfil realmente mapea (11 de 256), el mismo archivo se lee en
-    ~11 segundos.
+    OJO — esto NO es lo que explica la mejora de "más de 4 minutos" a segundos que describía
+    antes este mismo comentario (corregido en la auditoría de performance del 2026-09,
+    /auditoria/05-performance.md): esa mejora fue el efecto combinado de otras dos cosas del
+    mismo commit (40e1348) — el chequeo vectorizado previo en _repair_embedded_rows (~30 s a
+    ~0,1 s) y sacar del loop de _process_dataframe el recálculo de los sets de tipos
+    permitidos/notas de crédito por fila (~1 tercio del tiempo de procesamiento). Esta
+    función por sí sola aporta bastante menos: medido de nuevo sobre el mismo archivo real
+    ("SOLO VENTAS MAYO 2026.xls", 31 MB, 65.535 filas), pasar de 256 a 11 columnas ahorra
+    apenas ~15-20% del tiempo de pd.read_excel (11,4 s vs. 14,0 s en promedio de 2 corridas).
+
+    La razón: pandas.io.excel._xlrd.XlrdReader.get_sheet_data() (el reader que usa xlrd para
+    .xls) siempre itera las 256 columnas de cada fila del archivo — usecols no evita ese
+    trabajo, solo reduce qué columnas terminan armando el DataFrame final después. Para
+    reducir el costo de la lectura en sí en un .xls con este patrón (formato aplicado a toda
+    la grilla), hay que leer menos FILAS o CELDAS realmente parseadas por xlrd, no menos
+    columnas seleccionadas después — usecols sigue siendo correcto tenerlo (reduce memoria y
+    el trabajo de _process_dataframe más abajo, que si itera solo 11 columnas en vez de
+    256), pero no es la palanca que explica la mejora grande documentada en el commit.
 
     Se devuelve un callable, no una lista, para que una columna ausente en el archivo no
     haga fallar la lectura entera (usecols=[lista] tira ValueError si algún nombre no
@@ -565,8 +577,41 @@ class IngestionEngine:
         tipos_permitidos = profile.get("tipo_documento_permitidos")
         permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos} if tipos_permitidos is not None else None
         notas_credito_por_tipo = {_normalizar_tipo(t) for t in profile.get("tipo_documento_notas_credito", [])}
+        serie_prefijos = profile.get("serie_prefijos_no_fiscales", [])
 
-        for idx, r in records_df.iterrows():
+        n = len(records_df)
+
+        def _col(name: str) -> list:
+            return records_df[name].tolist() if name in records_df.columns else [None] * n
+
+        # Se extrae cada columna UNA sola vez como lista nativa de Python (reemplaza
+        # records_df.iterrows()) — medido en la auditoría de performance
+        # (/auditoria/05-performance.md): sobre un archivo real de 65.535 filas, iterrows()
+        # reconstruye una Series pandas (con coerción de tipo heterogénea) en cada una de
+        # esas 65.535 vueltas solo para poder leer r.get(...), y eso solo ya representaba
+        # ~46% del tiempo total de ingesta de ese archivo. Iterar sobre listas nativas con
+        # índice numérico mantiene EXACTAMENTE la misma lógica fila por fila de abajo (mismos
+        # "continue", mismo orden de chequeos, mismas llamadas a las mismas funciones) — no
+        # es una reescritura vectorizada de la lógica en sí (eso quedó fuera de alcance por
+        # el riesgo de alterar el resultado del state machine de Aloha, ver marker_col más
+        # abajo), solo se saca el costo de reconstruir una Series por fila.
+        tipo_documento_l = _col("tipo_documento")
+        serie_l = _col("serie")
+        numero_comprobante_l = _col("numero_comprobante")
+        fecha_l = _col("fecha")
+        total_l = _col("total")
+        gravada_bruta_l = _col("gravada_bruta")
+        iva_bruta_l = _col("iva_bruta")
+        gravada_10_l = _col("gravada_10")
+        iva_10_l = _col("iva_10")
+        gravada_5_l = _col("gravada_5")
+        iva_5_l = _col("iva_5")
+        exenta_l = _col("exenta")
+        ruc_l = _col("ruc")
+        nombre_cliente_l = _col("nombre_cliente")
+        estado_l = _col("estado")
+
+        for idx in range(n):
             if marker_col is not None and marker_col < len(df.columns):
                 raw_marker = df.iat[idx, marker_col]
                 if pd.notna(raw_marker):
@@ -579,7 +624,9 @@ class IngestionEngine:
             # Los cortes/subtotales ("Serie: 001 Totales", etc.) son un artefacto propio del
             # formato de Aloha (imprime esas filas al cierre de cada bloque) — para el resto
             # de los perfiles esto es trabajo desperdiciado, y df.iloc[idx] (acceso posicional
-            # fila a fila) es particularmente lento dentro de un loop de miles de filas.
+            # fila a fila) es particularmente lento dentro de un loop de miles de filas. Se
+            # deja intacto (sin optimizar): solo corre para perfiles con marker_col (Aloha),
+            # que no es el camino que domina el tiempo total (ver auditoría de performance).
             if marker_col is not None:
                 corte = _extract_corte(df.iloc[idx].tolist(), current_section)
                 if corte:
@@ -589,7 +636,7 @@ class IngestionEngine:
             # se captura siempre (no solo cuando hay lista de permitidos) porque más abajo
             # también se usa para armar el tipo_doc que se muestra en la grilla (ver el
             # cierre de este for), en vez de forzar todo a Factura/Nota de Crédito.
-            tipo_doc_raw = fix_mojibake(str(r.get("tipo_documento") or "").strip())
+            tipo_doc_raw = fix_mojibake(str(tipo_documento_l[idx] or "").strip())
 
             # Filtro explícito por tipo de comprobante, declarado por perfil: Hiopos solo
             # procesa factura de venta, factura de venta simplificada, abono factura de venta
@@ -603,7 +650,7 @@ class IngestionEngine:
             if permitidos_norm is not None and _normalizar_tipo(tipo_doc_raw) not in permitidos_norm:
                 continue
 
-            serie = str(r.get("serie") or "").strip()
+            serie = str(serie_l[idx] or "").strip()
             serie_norm = fix_mojibake(serie)
             if serie_norm.lower() in ["anulación", "anulacion"]:
                 continue
@@ -614,7 +661,7 @@ class IngestionEngine:
             # EEE-PPP, descartando comprobantes válidos por completo (confirmado sobre un
             # caso real: 879-1.063 facturas reales de Fabric Sushi se perdían enteras por
             # esto). El prefijo se declara en el perfil, no se hardcodea acá.
-            for prefijo in profile.get("serie_prefijos_no_fiscales", []):
+            for prefijo in serie_prefijos:
                 if serie_norm.upper().startswith(prefijo.upper()):
                     serie_norm = serie_norm[len(prefijo):]
                     break
@@ -647,7 +694,7 @@ class IngestionEngine:
             if notas_credito_por_tipo and _normalizar_tipo(tipo_doc_raw) in notas_credito_por_tipo:
                 es_credito = True
 
-            raw_doc = r.get("numero_comprobante")
+            raw_doc = numero_comprobante_l[idx]
             if serie_for_doc and not str(raw_doc).startswith(serie_for_doc):
                 try:
                     seq_int = int(float(str(raw_doc)))
@@ -663,40 +710,40 @@ class IngestionEngine:
             if not DOC_PATTERN.match(doc):
                 continue
 
-            fecha_iso = parse_date(r.get("fecha"))
+            fecha_iso = parse_date(fecha_l[idx])
             fecha_disp = format_display_date(fecha_iso)
 
             # Convención del libro propio (no de la comparación contra RG90, que sigue en
             # valor absoluto en reconcile_with_rg90): una nota de crédito resta de la venta,
             # así que sus montos quedan en negativo — es lo que permite que "Total Neto" dé la
             # venta neta real, tal como lo imprime el cliente en su Excel de referencia.
-            total = -abs(clean_numeric(r.get("total"))) if es_credito else abs(clean_numeric(r.get("total")))
+            total = -abs(clean_numeric(total_l[idx])) if es_credito else abs(clean_numeric(total_l[idx]))
 
             if usa_clasificacion_tasa:
-                gravada_bruta = -abs(clean_numeric(r.get("gravada_bruta"))) if es_credito else abs(clean_numeric(r.get("gravada_bruta")))
-                iva_bruta = -abs(clean_numeric(r.get("iva_bruta"))) if es_credito else abs(clean_numeric(r.get("iva_bruta")))
+                gravada_bruta = -abs(clean_numeric(gravada_bruta_l[idx])) if es_credito else abs(clean_numeric(gravada_bruta_l[idx]))
+                iva_bruta = -abs(clean_numeric(iva_bruta_l[idx])) if es_credito else abs(clean_numeric(iva_bruta_l[idx]))
                 gravada, iva, gravada_5, iva_5, exenta = classify_tax_rate(gravada_bruta, iva_bruta)
             else:
                 signo = -1 if es_credito else 1
-                gravada = signo * abs(clean_numeric(r.get("gravada_10")))
-                iva = signo * abs(clean_numeric(r.get("iva_10")))
-                gravada_5 = signo * abs(clean_numeric(r.get("gravada_5")))
-                iva_5 = signo * abs(clean_numeric(r.get("iva_5")))
-                exenta = signo * abs(clean_numeric(r.get("exenta")))
+                gravada = signo * abs(clean_numeric(gravada_10_l[idx]))
+                iva = signo * abs(clean_numeric(iva_10_l[idx]))
+                gravada_5 = signo * abs(clean_numeric(gravada_5_l[idx]))
+                iva_5 = signo * abs(clean_numeric(iva_5_l[idx]))
+                exenta = signo * abs(clean_numeric(exenta_l[idx]))
 
                 if total != 0 and gravada == 0 and gravada_5 == 0 and exenta == 0:
                     gravada = signo * round(abs(total) / 1.1, 0)
                     iva = total - gravada
 
-            ruc = str(r.get("ruc") or "").strip()
+            ruc = str(ruc_l[idx] or "").strip()
             if not ruc or ruc.upper() in ["NAN", "NONE", "NULL", "X"]:
                 ruc = "X"
 
-            nombre = fix_mojibake(str(r.get("nombre_cliente") or "").strip())
+            nombre = fix_mojibake(str(nombre_cliente_l[idx] or "").strip())
             if not nombre or nombre.upper() in ["NAN", "NONE", "NULL", "SIN NOMBRE"]:
                 nombre = "SIN NOMBRE"
 
-            estado = str(r.get("estado") or "Válida").strip()
+            estado = str(estado_l[idx] or "Válida").strip()
             if estado.upper() == "E":
                 estado = "Válida"
             elif estado.upper() == "A":

@@ -156,9 +156,34 @@ class ComprasEngine:
         # siempre trae la tilde.
         permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos} if tipos_permitidos is not None else None
 
+        n = len(records_df)
+
+        def _col(name: str) -> list:
+            return records_df[name].tolist() if name in records_df.columns else [None] * n
+
+        # Mismo criterio que en app/core/engine.py (ver /auditoria/05-performance.md): se
+        # extrae cada columna una sola vez como lista nativa en vez de reconstruir una
+        # Series pandas por fila vía records_df.iterrows() — misma lógica exacta de abajo,
+        # solo sin ese costo.
+        tipo_comprobante_l = _col("tipo_comprobante")
+        documento_l = _col("documento")
+        ruc_proveedor_raw_l = _col("ruc_proveedor_raw")
+        gravada_10_l = _col("gravada_10")
+        iva_10_l = _col("iva_10")
+        gravada_5_l = _col("gravada_5")
+        iva_5_l = _col("iva_5")
+        exenta_l = _col("exenta")
+        total_l = _col("total")
+        proveedor_l = _col("proveedor")
+        codigo_sucursal_l = _col("codigo_sucursal")
+        fecha_l = _col("fecha")
+        condicion_l = _col("condicion")
+        timbrado_l = _col("timbrado")
+        control_l = _col("control")
+
         rows: List[Dict[str, Any]] = []
-        for _, r in records_df.iterrows():
-            tipo_comprobante = fix_mojibake(str(r.get("tipo_comprobante") or "").strip())
+        for idx in range(n):
+            tipo_comprobante = fix_mojibake(str(tipo_comprobante_l[idx] or "").strip())
 
             # Filtro explícito por tipo de comprobante, declarado por perfil: la RG de
             # compras admite todos los tipos de comprobante que el SET reconoce para el
@@ -171,11 +196,11 @@ class ComprasEngine:
             if permitidos_norm is not None and _normalizar_tipo(tipo_comprobante) not in permitidos_norm:
                 continue
 
-            doc = normalize_invoice_number(r.get("documento"))
+            doc = normalize_invoice_number(documento_l[idx])
             if not doc or not DOC_PATTERN.match(doc):
                 continue
 
-            ruc, dv = _split_ruc_dv(r.get("ruc_proveedor_raw"))
+            ruc, dv = _split_ruc_dv(ruc_proveedor_raw_l[idx])
             if not ruc:
                 continue
             clave = f"{doc}{ruc}"
@@ -183,22 +208,22 @@ class ComprasEngine:
             es_credito = tipo_comprobante.upper() in _MARCADORES_NC
             signo = -1 if es_credito else 1
 
-            gravada_10 = signo * abs(clean_numeric(r.get("gravada_10")))
-            iva_10 = signo * abs(clean_numeric(r.get("iva_10")))
-            gravada_5 = signo * abs(clean_numeric(r.get("gravada_5")))
-            iva_5 = signo * abs(clean_numeric(r.get("iva_5")))
-            exenta = signo * abs(clean_numeric(r.get("exenta")))
-            total = signo * abs(clean_numeric(r.get("total")))
+            gravada_10 = signo * abs(clean_numeric(gravada_10_l[idx]))
+            iva_10 = signo * abs(clean_numeric(iva_10_l[idx]))
+            gravada_5 = signo * abs(clean_numeric(gravada_5_l[idx]))
+            iva_5 = signo * abs(clean_numeric(iva_5_l[idx]))
+            exenta = signo * abs(clean_numeric(exenta_l[idx]))
+            total = signo * abs(clean_numeric(total_l[idx]))
 
-            proveedor = fix_mojibake(str(r.get("proveedor") or "").strip()) or "SIN NOMBRE"
+            proveedor = fix_mojibake(str(proveedor_l[idx] or "").strip()) or "SIN NOMBRE"
 
             rows.append({
                 "doc": doc,
                 "clave": clave,
                 "sistema": profile["name"],
                 "local": local_name,
-                "codigo_sucursal": str(r.get("codigo_sucursal") or "").strip(),
-                "fecha": str(r.get("fecha") or "").strip(),
+                "codigo_sucursal": str(codigo_sucursal_l[idx] or "").strip(),
+                "fecha": str(fecha_l[idx] or "").strip(),
                 "ruc_proveedor": ruc,
                 "dv_proveedor": dv,
                 "proveedor": proveedor,
@@ -207,9 +232,9 @@ class ComprasEngine:
                 # Boleta de Venta, Nota de Débito, Ticket Máquina Registradora, etc.) en vez
                 # de forzar todo a Factura/Nota de Crédito.
                 "tipo_doc": tipo_doc_display(tipo_comprobante, es_credito),
-                "condicion": str(r.get("condicion") or "").strip(),
-                "timbrado": _texto_identificador(r.get("timbrado")),
-                "control": _texto_identificador(r.get("control")),
+                "condicion": str(condicion_l[idx] or "").strip(),
+                "timbrado": _texto_identificador(timbrado_l[idx]),
+                "control": _texto_identificador(control_l[idx]),
                 "gravadas": _fmt(gravada_10),
                 "iva": _fmt(iva_10),
                 "gravadas_5": _fmt(gravada_5),
