@@ -34,7 +34,7 @@ engine = IngestionEngine(PROFILES_DIR)
 # 6.246 filas de compras ya pesan ~4MB como JSON; un libro de ventas grande, bastante más).
 # Se sube el límite acá en vez de declarar pos_data_json como Form(...) directo, porque
 # FastAPI no expone ese parámetro a través del descriptor Form().
-FORM_MAX_PART_SIZE = 80 * 1024 * 1024
+FORM_MAX_PART_SIZE = 150 * 1024 * 1024
 
 # Auto-detección del sistema de ventas en /api/ingest: el Paso 1 del frontend ya no pide
 # elegir el sistema antes de adjuntar (mismo criterio que /api/compras/ingest, que nunca lo
