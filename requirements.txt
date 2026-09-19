@@ -27,6 +27,7 @@ pycparser==3.0
 pydantic==2.13.4
 pydantic-settings==2.15.0
 pydantic_core==2.46.4
+python-calamine==0.8.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 python-jose==3.5.0

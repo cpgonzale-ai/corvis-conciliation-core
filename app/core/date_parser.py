@@ -10,6 +10,26 @@ from datetime import datetime, date
 import xlrd
 from typing import Optional, Union
 
+# Se recuerda, a nivel de módulo, cuál de los formatos de DATE_FORMATS funcionó la última
+# vez: dentro de un mismo archivo, la enorme mayoría de las filas comparten el mismo formato
+# de fecha (es el mismo reporte, exportado de la misma forma) — probarlo primero evita
+# reintentar en cada fila los formatos que ya se sabe que no van a matchear. Medido en
+# /auditoria/09-performance-backend-ingesta.md: 600.000 llamadas a strptime para 200.000
+# filas (~3 por fecha, incluyendo format_display_date) — con esto, el caso común baja a 1
+# intento en vez de 2 dentro de parse_date. Es solo un ORDEN de intento: si el formato
+# recordado no matchea una fila puntual, se prueba la lista completa en el mismo orden de
+# siempre — no cambia qué fechas se aceptan ni cómo se interpretan.
+_ultimo_formato_fecha_ok: Optional[str] = None
+
+DATE_FORMATS = [
+    "%d/%m/%Y",
+    "%Y-%m-%d",
+    "%d-%m-%Y",
+    "%Y/%m/%d",
+    "%d/%m/%y",
+    "%d-%m-%y",
+]
+
 
 def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
     if value is None or str(value).strip() == "" or str(value).strip().lower() in ["nan", "null", "none", "—"]:
@@ -48,18 +68,18 @@ def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
     if " " in s_val:
         s_val = s_val.split(" ")[0]
 
-    formats = [
-        "%d/%m/%Y",
-        "%Y-%m-%d",
-        "%d-%m-%Y",
-        "%Y/%m/%d",
-        "%d/%m/%y",
-        "%d-%m-%y"
-    ]
+    global _ultimo_formato_fecha_ok
+    if _ultimo_formato_fecha_ok is not None:
+        try:
+            dt = datetime.strptime(s_val, _ultimo_formato_fecha_ok)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass  # esta fila puntual no matchea el formato recordado -- se sigue abajo con la lista completa
 
-    for fmt in formats:
+    for fmt in DATE_FORMATS:
         try:
             dt = datetime.strptime(s_val, fmt)
+            _ultimo_formato_fecha_ok = fmt
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             continue

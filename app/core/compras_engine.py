@@ -111,7 +111,10 @@ class ComprasEngine:
         if ext not in [".xls", ".xlsx"]:
             df = pd.read_csv(file_path, sep=";", header=hdr_idx, usecols=usecols)
         else:
-            sheet_names = pd.ExcelFile(file_path).sheet_names
+            # engine="calamine" — mismo cambio y misma medición que en app/core/engine.py,
+            # ver /auditoria/09-performance-backend-ingesta.md (93,7% del tiempo de ingesta
+            # era openpyxl; calamine da el mismo resultado 8-9x más rápido).
+            sheet_names = pd.ExcelFile(file_path, engine="calamine").sheet_names
             if not _matches_profile_signature(file_path, sheet_names, profile):
                 raise ValueError(
                     f"El archivo no parece corresponder al formato de {profile['name']}. "
@@ -132,7 +135,7 @@ class ComprasEngine:
                     )
                 sheet_index = encontrada
 
-            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index, usecols=usecols)
+            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index, usecols=usecols, engine="calamine")
 
         df.columns = [str(c).strip() for c in df.columns]
         return self._process_dataframe(df, profile, local_name)

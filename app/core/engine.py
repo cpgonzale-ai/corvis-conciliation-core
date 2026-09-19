@@ -405,7 +405,7 @@ def _matches_profile_signature(file_path: str, sheet_names: List[str], profile: 
     for sheet in sheet_names:
         if signature_text:
             try:
-                raw = pd.read_excel(file_path, sheet_name=sheet, header=None, nrows=15)
+                raw = pd.read_excel(file_path, sheet_name=sheet, header=None, nrows=15, engine="calamine")
             except Exception:
                 continue
             texto = " ".join(str(v) for v in raw.values.flatten() if pd.notna(v))
@@ -414,7 +414,7 @@ def _matches_profile_signature(file_path: str, sheet_names: List[str], profile: 
 
         if signature_columns:
             try:
-                df_hdr = pd.read_excel(file_path, sheet_name=sheet, header=hdr_idx, nrows=1)
+                df_hdr = pd.read_excel(file_path, sheet_name=sheet, header=hdr_idx, nrows=1, engine="calamine")
             except Exception:
                 continue
             cols = {str(c).strip().lower() for c in df_hdr.columns}
@@ -442,7 +442,7 @@ class IngestionEngine:
     def _read_source(self, file_path: str, ext: str, hdr_idx: int, sheet_index: int) -> pd.DataFrame:
         if ext not in [".xls", ".xlsx"]:
             return pd.read_csv(file_path, sep=";", header=hdr_idx)
-        return pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index)
+        return pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index, engine="calamine")
 
     def ingest_file(self, file_path: str, profile_id: str, local_name: str = "Local General") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         profile = self.profiles.get(profile_id)
@@ -463,7 +463,18 @@ class IngestionEngine:
             df = _repair_embedded_rows(df)
             return self._process_dataframe(df, profile, local_name)
 
-        sheet_names = pd.ExcelFile(file_path).sheet_names
+        # engine="calamine" en las 3 lecturas de este método (acá y las dos de más abajo) y
+        # en _read_source/_matches_profile_signature: calamine (python-calamine, lector
+        # Excel en Rust) reemplaza a openpyxl, el motor por defecto de pandas para .xlsx —
+        # medido en /auditoria/09-performance-backend-ingesta.md: openpyxl es 93,7% del
+        # tiempo total de ingesta de un archivo de 200.000 filas (celda por celda vía XML
+        # puro en Python); el mismo archivo con calamine tardó 8-9x menos, sin cambiar ni
+        # una fila del resultado. Validado además con archivos reales del cliente (.xls y
+        # .xlsx completos, incluido el caso ya documentado de Libro Ventas Fabric.xls) —
+        # calamine devuelve exactamente el mismo DataFrame (mismas hojas, mismos valores,
+        # mismos tipos) que el motor anterior, confirmado celda por celda con
+        # DataFrame.equals() antes de aplicar este cambio.
+        sheet_names = pd.ExcelFile(file_path, engine="calamine").sheet_names
 
         if not _matches_profile_signature(file_path, sheet_names, profile):
             raise ValueError(
@@ -519,13 +530,13 @@ class IngestionEngine:
             # grande— se leía entera (40 s) solo para descartarla después.
             if len(candidatos) > 1 and nombres_esperados is not None:
                 try:
-                    hdr_df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, nrows=0)
+                    hdr_df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, nrows=0, engine="calamine")
                 except Exception:
                     hdr_df = None
                 if hdr_df is not None and not (set(hdr_df.columns) & nombres_esperados):
                     continue
 
-            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, usecols=usecols)
+            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, usecols=usecols, engine="calamine")
             df = _repair_embedded_rows(df)
             rows, cortes = self._process_dataframe(df, profile, local_name)
             if rows:
