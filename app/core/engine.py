@@ -7,9 +7,11 @@ import os
 import re
 import json
 import unicodedata
+from datetime import datetime, date
+import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
-from app.core.date_parser import parse_date, format_display_date
+from app.core.date_parser import parse_date, format_display_date, DATE_FORMATS
 
 # Dos tolerancias separadas — antes era una sola (MONTO_TOLERANCE) usada para dos cosas
 # distintas, lo que hacía que no se pudiera ajustar una sin afectar la otra:
@@ -233,6 +235,106 @@ def classify_tax_rate(gravada_bruta: float, iva_bruta: float) -> Tuple[float, fl
     if mejor == diff_10:
         return gravada_bruta, iva_bruta, 0.0, 0.0, 0.0
     return 0.0, 0.0, gravada_bruta, iva_bruta, 0.0
+
+
+# ---------------------------------------------------------------------------------------
+# Camino vectorizado de _process_dataframe (auditoria/10-vectorizacion-process-dataframe.md)
+# — SOLO para perfiles sin estado entre filas (section_marker_col es None; hoy es únicamente
+# Aloha el que lo declara — ver app/profiles/*.json — así que Universal, Hiopos y RG90 SET
+# entran acá). El bucle fila por fila original queda intacto y sin tocar para Aloha, donde
+# el estado current_section (factura/nota de crédito, que depende de la fila anterior) no es
+# un mapeo elemento por elemento y vectorizarlo sería mucho más riesgoso.
+# ---------------------------------------------------------------------------------------
+
+def classify_tax_rate_vec(gravada_bruta: np.ndarray, iva_bruta: np.ndarray) -> Tuple[np.ndarray, ...]:
+    """Misma función que classify_tax_rate, vectorizada con numpy — puramente aritmética,
+    sin ninguna ambigüedad de tipos que resolver (a diferencia de clean_numeric), así que se
+    vectoriza directo sin necesidad de casos especiales. Mismo orden de prioridad
+    (fuera de tolerancia -> exento -> 10% -> 5%, con "exento" ganando empates con "10%" tal
+    como hace el if/elif original) vía np.select, que evalúa las condiciones en orden y usa
+    la primera que matchea."""
+    diff_exento = np.abs(iva_bruta)
+    diff_10 = np.abs(gravada_bruta * 0.10 - iva_bruta)
+    diff_5 = np.abs(gravada_bruta * 0.05 - iva_bruta)
+    mejor = np.minimum(np.minimum(diff_exento, diff_10), diff_5)
+
+    fuera_tolerancia = mejor > MONTO_TOLERANCE_CLASIFICACION
+    es_exento = mejor == diff_exento
+    es_10 = mejor == diff_10
+    condiciones = [fuera_tolerancia, es_exento, es_10]
+
+    gravada = np.select(condiciones, [gravada_bruta, 0.0, gravada_bruta], default=0.0)
+    iva = np.select(condiciones, [iva_bruta, 0.0, iva_bruta], default=0.0)
+    gravada_5 = np.select(condiciones, [0.0, 0.0, 0.0], default=gravada_bruta)
+    iva_5 = np.select(condiciones, [0.0, 0.0, 0.0], default=iva_bruta)
+    exenta = np.select(condiciones, [0.0, gravada_bruta, 0.0], default=0.0)
+    return gravada, iva, gravada_5, iva_5, exenta
+
+
+def _clean_numeric_series(s: pd.Series) -> pd.Series:
+    """Misma función que clean_numeric, vectorizada por columna. Réplica exacta del orden
+    de decisión original: None/NaN -> 0.0; valor YA int/float en origen -> float(x) directo
+    (SIN pasar por el reemplazo de separadores); cualquier otra cosa (típicamente string) ->
+    reemplazar "." y "," al estilo es-PY y convertir, 0.0 si falla. Esta rama por tipo es
+    necesaria: pd.to_numeric por sí solo interpretaría un string como "1.5" en notación
+    inglesa (1.5), mientras que clean_numeric lo trata como "1.500" al estilo es-PY (punto de
+    miles) al no ser un tipo numérico nativo — no son intercambiables."""
+    es_nulo = s.map(lambda v: v is None or pd.isna(v))
+    es_numero_nativo = s.map(lambda v: isinstance(v, (int, float))) & ~es_nulo
+
+    resultado = pd.Series(0.0, index=s.index)
+    if es_numero_nativo.any():
+        resultado.loc[es_numero_nativo] = s.loc[es_numero_nativo].astype(float)
+
+    resto_mask = ~es_numero_nativo & ~es_nulo
+    if resto_mask.any():
+        textos = s.loc[resto_mask].astype(str).str.strip().str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        resultado.loc[resto_mask] = pd.to_numeric(textos, errors="coerce").fillna(0.0)
+
+    return resultado
+
+
+def _parse_fechas_vectorizado(fecha_s: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    """Versión vectorizada de aplicar parse_date + format_display_date fila por fila (ver
+    date_parser.py) — tres niveles, del más al menos común, cada uno reduciendo lo que le
+    queda resolver al siguiente:
+
+    1) Celdas que pandas ya parseó como datetime/date (lo más común cuando la columna de
+       fecha del Excel tiene formato de fecha real, no texto) — vectorizado 100% con
+       .dt.strftime().
+    2) El resto, como texto: se prueban los mismos formatos de DATE_FORMATS, en el mismo
+       orden, con pd.to_datetime() sobre toda la columna restante a la vez por formato, en
+       vez de fila por fila con strptime.
+    3) Lo que ninguno de los dos anteriores pudo resolver (seriales de Excel como número,
+       valores nulos/centinela, cualquier caso raro) se delega a parse_date() original, fila
+       por fila, sólo sobre ese subconjunto residual — garantiza el mismo resultado que el
+       camino de siempre para esos casos sin reimplementar su lógica (que ya cubre seriales
+       vía xlrd, timestamps con hora, y los valores nulos/centinela)."""
+    resultado = pd.Series([None] * len(fecha_s), index=fecha_s.index, dtype=object)
+
+    es_fecha_nativa = fecha_s.map(lambda v: isinstance(v, (datetime, date)))
+    if es_fecha_nativa.any():
+        resultado.loc[es_fecha_nativa] = pd.to_datetime(fecha_s.loc[es_fecha_nativa]).dt.strftime("%Y-%m-%d")
+
+    pendientes_mask = ~es_fecha_nativa
+    for fmt in DATE_FORMATS:
+        if not pendientes_mask.any():
+            break
+        subset_idx = fecha_s.index[pendientes_mask]
+        s_val = fecha_s.loc[subset_idx].astype(str).str.strip().str.split(" ", n=1).str[0]
+        candidatos = pd.to_datetime(s_val, format=fmt, errors="coerce")
+        ok_idx = subset_idx[candidatos.notna()]
+        if len(ok_idx):
+            resultado.loc[ok_idx] = candidatos.loc[ok_idx].dt.strftime("%Y-%m-%d")
+            pendientes_mask.loc[ok_idx] = False
+
+    if pendientes_mask.any():
+        subset_idx = fecha_s.index[pendientes_mask]
+        resultado.loc[subset_idx] = fecha_s.loc[subset_idx].map(parse_date)
+
+    fecha_iso_s = resultado
+    fecha_disp_s = fecha_iso_s.map(format_display_date)
+    return fecha_iso_s, fecha_disp_s
 
 
 def _extract_corte(raw_row: List[Any], seccion: str) -> Optional[Dict[str, Any]]:
@@ -592,6 +694,15 @@ class IngestionEngine:
 
         n = len(records_df)
 
+        if n == 0:
+            return processed_rows, cortes
+
+        if marker_col is None:
+            return self._process_dataframe_vectorizado(
+                records_df, profile, local_name, usa_clasificacion_tasa,
+                permitidos_norm, notas_credito_por_tipo, serie_prefijos,
+            )
+
         def _col(name: str) -> list:
             return records_df[name].tolist() if name in records_df.columns else [None] * n
 
@@ -791,6 +902,200 @@ class IngestionEngine:
                 "tipo_doc": tipo_doc_display(tipo_doc_raw, es_credito),
             })
 
+        return processed_rows, cortes
+
+    def _process_dataframe_vectorizado(
+        self,
+        records_df: pd.DataFrame,
+        profile: Dict,
+        local_name: str,
+        usa_clasificacion_tasa: bool,
+        permitidos_norm: Optional[set],
+        notas_credito_por_tipo: set,
+        serie_prefijos: List[str],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Camino vectorizado de _process_dataframe, para perfiles SIN estado entre filas
+        (marker_col es None — ver auditoria/10-vectorizacion-process-dataframe.md). Replica,
+        columna por columna en vez de fila por fila, exactamente la misma secuencia de
+        chequeos/transformaciones del bucle original (_process_dataframe arriba, camino
+        marker_col is not None) — mismo orden de descarte, mismas funciones de limpieza,
+        mismo criterio de valor por defecto en cada caso. cortes siempre vacío acá: los
+        cortes/subtotales son un artefacto exclusivo del formato de Aloha (único perfil con
+        marker_col), que nunca entra a este método."""
+        cortes: List[Dict[str, Any]] = []
+        n = len(records_df)
+
+        def _col_s(name: str) -> pd.Series:
+            return records_df[name] if name in records_df.columns else pd.Series([None] * n, index=records_df.index)
+
+        tipo_documento_s = _col_s("tipo_documento")
+        serie_s = _col_s("serie")
+        numero_comprobante_s = _col_s("numero_comprobante")
+        fecha_s = _col_s("fecha")
+        total_s = _col_s("total")
+        gravada_bruta_s = _col_s("gravada_bruta")
+        iva_bruta_s = _col_s("iva_bruta")
+        gravada_10_s = _col_s("gravada_10")
+        iva_10_s = _col_s("iva_10")
+        gravada_5_s = _col_s("gravada_5")
+        iva_5_s = _col_s("iva_5")
+        exenta_s = _col_s("exenta")
+        ruc_s = _col_s("ruc")
+        nombre_cliente_s = _col_s("nombre_cliente")
+        estado_s = _col_s("estado")
+
+        # tipo_doc_raw: str(x or "").strip() y después fix_mojibake — se aplica con .map()
+        # (no un ufunc numpy) para preservar EXACTO el chequeo "truthy" de Python: None -> "",
+        # pero NaN (float) es "truthy" en Python y termina como la string "nan", no "" — una
+        # diferencia real que un reemplazo ingenuo con fillna("") rompería.
+        tipo_doc_raw_s = tipo_documento_s.map(lambda v: str(v or "").strip()).map(fix_mojibake)
+        tipo_doc_raw_norm_s = tipo_doc_raw_s.map(_normalizar_tipo)
+
+        mask = pd.Series(True, index=records_df.index)
+        if permitidos_norm is not None:
+            mask &= tipo_doc_raw_norm_s.isin(permitidos_norm)
+
+        serie_pre_prefijo_s = serie_s.map(lambda v: str(v or "").strip()).map(fix_mojibake)
+        mask &= ~serie_pre_prefijo_s.str.lower().isin(["anulación", "anulacion"])
+
+        # Prefijos no fiscales (ej. "FE" de Hiopos): típicamente 0-2 declarados por perfil,
+        # no vale la pena vectorizar el propio for/break — se aplica una vez por fila vía
+        # .map() para preservar "el primero que matchea, corta" del original.
+        if serie_prefijos:
+            def _quitar_prefijo(s: str) -> str:
+                for prefijo in serie_prefijos:
+                    if s.upper().startswith(prefijo.upper()):
+                        return s[len(prefijo):]
+                return s
+            serie_norm_s = serie_pre_prefijo_s.map(_quitar_prefijo)
+        else:
+            serie_norm_s = serie_pre_prefijo_s
+
+        serie_no_vacia = serie_norm_s != ""
+        mask &= ~(serie_no_vacia & ~serie_norm_s.str.upper().str.match(SERIE_PATTERN))
+
+        es_credito_s = serie_norm_s.str.upper().str.startswith("NC")
+        serie_for_doc_s = serie_norm_s.where(~es_credito_s, serie_norm_s.str.slice(2))
+        if notas_credito_por_tipo:
+            es_credito_s = es_credito_s | tipo_doc_raw_norm_s.isin(notas_credito_por_tipo)
+
+        # doc: misma lógica de 3 ramas (try int(float(...)), except ValueError, o directo)
+        # que el original, vía .map() sobre pares (serie_for_doc, raw_doc) — el branching con
+        # try/except no tiene un equivalente numpy limpio y seguro, así que se preserva
+        # literal, solo aplicado columna por columna en vez de dentro del loop principal.
+        def _armar_doc(par: Tuple[str, Any]) -> Optional[str]:
+            serie_for_doc, raw_doc = par
+            if serie_for_doc and not str(raw_doc).startswith(serie_for_doc):
+                try:
+                    seq_int = int(float(str(raw_doc)))
+                    return f"{serie_for_doc}-{seq_int:07d}"
+                except ValueError:
+                    return normalize_invoice_number(f"{serie_for_doc}-{raw_doc}")
+            return normalize_invoice_number(raw_doc)
+
+        doc_s = pd.Series(
+            [_armar_doc(par) for par in zip(serie_for_doc_s, numero_comprobante_s)],
+            index=records_df.index,
+        )
+        mask &= doc_s.map(lambda d: bool(d) and bool(DOC_PATTERN.match(d)))
+
+        idx_keep = records_df.index[mask]
+        if len(idx_keep) == 0:
+            return [], cortes
+
+        doc_kept = doc_s.loc[idx_keep]
+        es_credito_kept = es_credito_s.loc[idx_keep].to_numpy()
+        tipo_doc_raw_kept = tipo_doc_raw_s.loc[idx_keep]
+
+        # Fechas — pd.to_datetime en cascada por formato sobre la columna completa (la mayor
+        # ganancia medida en la auditoría), con el mismo parse_date original como respaldo
+        # fila por fila solo para lo que quede sin resolver (seriales de Excel, nulos).
+        fecha_iso_s, fecha_disp_s = _parse_fechas_vectorizado(fecha_s.loc[idx_keep])
+
+        # Montos — pd.to_numeric vectorizado (via _clean_numeric_series, que preserva la
+        # rama por tipo de clean_numeric — ver su docstring).
+        total_num = _clean_numeric_series(total_s.loc[idx_keep]).to_numpy()
+        total_kept = np.where(es_credito_kept, -np.abs(total_num), np.abs(total_num))
+
+        if usa_clasificacion_tasa:
+            gravada_bruta_num = _clean_numeric_series(gravada_bruta_s.loc[idx_keep]).to_numpy()
+            iva_bruta_num = _clean_numeric_series(iva_bruta_s.loc[idx_keep]).to_numpy()
+            gravada_bruta_kept = np.where(es_credito_kept, -np.abs(gravada_bruta_num), np.abs(gravada_bruta_num))
+            iva_bruta_kept = np.where(es_credito_kept, -np.abs(iva_bruta_num), np.abs(iva_bruta_num))
+            gravada_kept, iva_kept, gravada_5_kept, iva_5_kept, exenta_kept = classify_tax_rate_vec(gravada_bruta_kept, iva_bruta_kept)
+        else:
+            signo_kept = np.where(es_credito_kept, -1, 1)
+            gravada_kept = signo_kept * np.abs(_clean_numeric_series(gravada_10_s.loc[idx_keep]).to_numpy())
+            iva_kept = signo_kept * np.abs(_clean_numeric_series(iva_10_s.loc[idx_keep]).to_numpy())
+            gravada_5_kept = signo_kept * np.abs(_clean_numeric_series(gravada_5_s.loc[idx_keep]).to_numpy())
+            iva_5_kept = signo_kept * np.abs(_clean_numeric_series(iva_5_s.loc[idx_keep]).to_numpy())
+            exenta_kept = signo_kept * np.abs(_clean_numeric_series(exenta_s.loc[idx_keep]).to_numpy())
+
+            fallback_mask = (total_kept != 0) & (gravada_kept == 0) & (gravada_5_kept == 0) & (exenta_kept == 0)
+            gravada_fallback = signo_kept * np.round(np.abs(total_kept) / 1.1, 0)
+            iva_fallback = total_kept - gravada_fallback
+            gravada_kept = np.where(fallback_mask, gravada_fallback, gravada_kept)
+            iva_kept = np.where(fallback_mask, iva_fallback, iva_kept)
+
+        ruc_kept = ruc_s.loc[idx_keep].map(lambda v: str(v or "").strip())
+        ruc_bad = ruc_kept.eq("") | ruc_kept.str.upper().isin(["NAN", "NONE", "NULL", "X"])
+        ruc_kept = ruc_kept.where(~ruc_bad, "X")
+
+        nombre_kept = nombre_cliente_s.loc[idx_keep].map(lambda v: str(v or "").strip()).map(fix_mojibake)
+        nombre_bad = nombre_kept.eq("") | nombre_kept.str.upper().isin(["NAN", "NONE", "NULL", "SIN NOMBRE"])
+        nombre_kept = nombre_kept.where(~nombre_bad, "SIN NOMBRE")
+
+        # estado: default "Válida" con el mismo chequeo truthy de Python (str(x or "Válida")
+        # — un NaN, al ser truthy, NO cae en el default, termina como la string "nan", igual
+        # que en el original), después E/A/derivado-de-total==0 con la misma prioridad
+        # if/elif del original vía np.select.
+        estado_kept = estado_s.loc[idx_keep].map(lambda v: str(v or "Válida").strip())
+        estado_upper = estado_kept.str.upper().to_numpy()
+        estado_lower = estado_kept.str.lower().to_numpy()
+        cond_e = estado_upper == "E"
+        cond_a = estado_upper == "A"
+        cond_total_cero = (total_kept == 0) & (estado_lower != "anulada")
+        estado_final = np.select([cond_e, cond_a, cond_total_cero], ["Válida", "Anulada", "Anulada"], default=estado_kept.to_numpy())
+
+        tipo_doc_kept = [tipo_doc_display(t, bool(ec)) for t, ec in zip(tipo_doc_raw_kept, es_credito_kept)]
+
+        # .iat[i]/.loc[i] dentro del listcomp de abajo tienen overhead real por llamada (cada
+        # acceso pasa por la maquinaria de indexado de pandas) — se extraen a listas nativas
+        # UNA sola vez antes del loop, mismo criterio que _col() ya usaba en el camino
+        # original para evitar precisamente ese costo fila por fila.
+        doc_l = doc_kept.tolist()
+        fecha_disp_l = fecha_disp_s.tolist()
+        fecha_iso_l = fecha_iso_s.tolist()
+        ruc_l = ruc_kept.tolist()
+        nombre_l = nombre_kept.tolist()
+
+        sistema = profile["name"]
+        processed_rows = [
+            {
+                "doc": doc_l[i],
+                "sistema": sistema,
+                "local": local_name,
+                "fecha": fecha_disp_l[i],
+                "fecha_iso": fecha_iso_l[i],
+                "ruc": ruc_l[i],
+                "nombre": nombre_l[i],
+                "gravadas": fmt_gs(gravada_kept[i]),
+                "iva": fmt_gs(iva_kept[i]),
+                "gravadas_5": fmt_gs(gravada_5_kept[i]),
+                "iva_5": fmt_gs(iva_5_kept[i]),
+                "exentas": fmt_gs(exenta_kept[i]),
+                "total": fmt_gs(total_kept[i]),
+                "gravadas_num": float(gravada_kept[i]),
+                "iva_num": float(iva_kept[i]),
+                "gravadas_5_num": float(gravada_5_kept[i]),
+                "iva_5_num": float(iva_5_kept[i]),
+                "exentas_num": float(exenta_kept[i]),
+                "total_num": float(total_kept[i]),
+                "estado": estado_final[i],
+                "tipo_doc": tipo_doc_kept[i],
+            }
+            for i in range(len(idx_keep))
+        ]
         return processed_rows, cortes
 
 
