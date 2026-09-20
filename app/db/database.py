@@ -10,13 +10,19 @@ from app.core.config import settings
 # peticiones concurrentes a endpoints de lectura simples devolvían 80% de errores 500
 # (sqlalchemy.exc.TimeoutError: QueuePool limit... connection timed out) — ver
 # auditoria/11-auditoria-360-completa.md, Fase 4. pool_pre_ping ya estaba (recicla
-# conexiones muertas); se suman los tamaños explícitos para soportar la concurrencia real
-# medida sin agotar el pool.
+# conexiones muertas).
+#
+# pool_size=15 + max_overflow=25 -> techo real de 40 conexiones POR WORKER (no solo
+# pool_size: max_overflow son conexiones reales que se abren bajo carga). Con
+# --workers 2 en siscom-backend.service, el techo real del proceso completo es
+# 2 x 40 = 80 conexiones, dejando 20 libres de las 100 que soporta Postgres
+# (max_connections) para mantenimiento y el resto de los servicios que comparten
+# esta misma instancia.
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
-    pool_size=20,
-    max_overflow=30,
+    pool_size=15,
+    max_overflow=25,
     pool_timeout=30,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
