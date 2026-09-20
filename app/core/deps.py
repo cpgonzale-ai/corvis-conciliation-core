@@ -2,11 +2,12 @@
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session
 
+from app.core import permisos_cache
 from app.core.security import decode_access_token
 from app.db.database import get_db
-from app.db.models import Permiso, Rol, Usuario
+from app.db.models import Usuario
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -29,16 +30,16 @@ def get_current_user(
     if not nro_documento:
         raise credentials_error
 
-    # joinedload (N-a-1, usuario->rol_obj) + selectinload (N-a-N, rol->permisos) en la misma
-    # consulta -- antes cada pedido autenticado que tocara usuario.rol_obj.permisos (ej.
-    # /api/auth/me) disparaba 2 consultas extra por separado, en el camino más transitado de
-    # toda la API. Ver auditoria/11-auditoria-360-completa.md, Fase 3.
-    usuario = (
-        db.query(Usuario)
-        .options(joinedload(Usuario.rol_obj).selectinload(Rol.permisos))
-        .filter(Usuario.nro_documento == nro_documento)
-        .first()
-    )
+    # Consulta simple, sin eager-load de rol_obj/permisos: ese dato ahora se resuelve vía
+    # permisos_cache.rol_info (caché en memoria con TTL, ver ese módulo) en vez de una
+    # consulta -- en la ronda anterior (ver auditoria/11-auditoria-360-completa.md, Fase 3)
+    # se había resuelto el N+1 con joinedload/selectinload acá, pero eso seguía siendo 2
+    # consultas por pedido en el camino más transitado de toda la API; con 100 pedidos
+    # concurrentes en la prueba de carga (Fase 4) igual agotaba el pool. El activo/existencia
+    # del usuario SÍ tiene que ser siempre fresco (por eso esta consulta sigue yendo a la
+    # base de datos en cada pedido, sin cachear) -- lo que se cachea es el catálogo de
+    # roles/permisos, que cambia mucho menos.
+    usuario = db.query(Usuario).filter(Usuario.nro_documento == nro_documento).first()
     if usuario is None or not usuario.activo:
         raise credentials_error
     return usuario
@@ -67,13 +68,10 @@ def require_permission(clave: str):
             return usuario
         if usuario.rol_id is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tenés permiso para esta acción.")
-        tiene_permiso = (
-            db.query(Permiso)
-            .join(Permiso.roles)
-            .filter(Rol.id == usuario.rol_id, Rol.estado == "activo", Permiso.clave == clave)
-            .first()
-        )
-        if not tiene_permiso:
+        # permisos_cache.rol_info en vez de la consulta JOIN Permiso/Rol de antes -- misma
+        # caché que usa get_current_user/me, ver app/core/permisos_cache.py.
+        info = permisos_cache.rol_info(db, usuario.rol_id)
+        if info is None or info["estado"] != "activo" or clave not in info["permisos"]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tenés permiso para esta acción.")
         return usuario
 

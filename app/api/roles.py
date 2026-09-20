@@ -6,8 +6,9 @@ borrar porque el backend depende de que 'admin' exista siempre como válvula de 
 nombre del rol como string. Sus permisos sí se pueden editar libremente."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
+from app.core import permisos_cache
 from app.core.audit import log_evento as _log_evento
 from app.core.deps import get_current_user, require_permission
 from app.db.database import get_db
@@ -28,7 +29,10 @@ def _rol_out(rol: Rol) -> RolOut:
 def listar_permisos(db: Session = Depends(get_db), usuario: Usuario = Depends(get_current_user)):
     """Catálogo completo de permisos disponibles (pantallas y botones) — lo consulta la
     pantalla de administración de roles para armar la matriz de checkboxes."""
-    return db.query(Permiso).order_by(Permiso.pantalla, Permiso.tipo, Permiso.clave).all()
+    # Cacheado (permisos_cache, TTL 5 min) — este catálogo casi no cambia, y antes se
+    # consultaba entero en cada carga de la pantalla. Ver auditoria/11-auditoria-360-completa.md.
+    filas = permisos_cache.permisos_catalogo_rows(db)
+    return [PermisoOut(id=i, clave=c, nombre=n, tipo=t, pantalla=p) for i, c, n, t, p in filas]
 
 
 @router.get("", response_model=list[RolOut])
@@ -37,13 +41,13 @@ def listar_roles(db: Session = Depends(get_db), usuario: Usuario = Depends(get_c
     # pantalla de Usuarios también necesita esta lista para el selector de rol al
     # crear/editar, aunque ese rol no tenga acceso a la administración de roles en sí.
     #
-    # selectinload (N-a-N, rol->permisos): antes _rol_out disparaba 1 consulta extra POR
-    # ROL al leer rol.permisos (N+1 clásico) — ver auditoria/11-auditoria-360-completa.md,
-    # Fase 3. selectinload en vez de joinedload porque hay varias filas padre (Rol) en la
-    # misma consulta -- joinedload multiplicaría filas por cada permiso, selectinload hace
-    # una segunda consulta con IN (...) en vez de eso.
-    roles = db.query(Rol).options(selectinload(Rol.permisos)).order_by(Rol.nombre).all()
-    return [_rol_out(r) for r in roles]
+    # Cacheado (permisos_cache, TTL 5 min) — la ronda anterior ya había resuelto acá el N+1
+    # de rol.permisos con selectinload (ver auditoria/11-auditoria-360-completa.md, Fase 3),
+    # pero bajo la prueba de carga de la Fase 4 (100 pedidos concurrentes) seguía siendo el
+    # endpoint con más consultas por pedido y el único que no llegaba a 100% OK — cachear el
+    # listado entero saca esas consultas del camino caliente casi siempre.
+    roles = permisos_cache.roles_listado_rows(db)
+    return [RolOut(**r) for r in roles]
 
 
 @router.post("", response_model=RolOut, status_code=status.HTTP_201_CREATED)
@@ -61,6 +65,7 @@ def crear_rol(
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
+    permisos_cache.invalidar_todo()
     _log_evento(db, usuario.id, "alta_rol", request, detalle={"rol_id": nuevo.id, "nombre": nuevo.nombre, "permisos": datos.permisos})
     return _rol_out(nuevo)
 
@@ -93,6 +98,7 @@ def editar_rol(
 
     db.commit()
     db.refresh(rol)
+    permisos_cache.invalidar_todo()
     _log_evento(db, usuario.id, "edicion_rol", request, detalle={"rol_id": rol.id, "nombre": rol.nombre, "permisos": datos.permisos})
     return _rol_out(rol)
 
@@ -115,4 +121,5 @@ def eliminar_rol(
     detalle = {"rol_id": rol.id, "nombre": rol.nombre}
     db.delete(rol)
     db.commit()
+    permisos_cache.invalidar_todo()
     _log_evento(db, usuario.id, "baja_rol", request, detalle=detalle)

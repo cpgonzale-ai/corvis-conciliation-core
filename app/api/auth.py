@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
+from app.core import permisos_cache
 from app.core.audit import log_evento as _log_evento
 from app.core.deps import get_current_user, require_permission
 from app.core.security import create_access_token, hash_password, verify_password
@@ -33,11 +34,13 @@ def me(db: Session = Depends(get_db), usuario: Usuario = Depends(get_current_use
         # El rol admin siempre tiene acceso total (ver require_permission), así que se
         # informa el catálogo completo de permisos aunque a rol_permisos le falte alguno
         # por una mala edición — el frontend no debe ocultarle nada al admin.
-        from app.db.models import Permiso
-        permisos = [p.clave for p in db.query(Permiso).all()]
+        permisos = [clave for _id, clave, _nombre, _tipo, _pantalla in permisos_cache.permisos_catalogo_rows(db)]
     else:
         # Un rol inactivo no habilita ningún permiso (mismo criterio que require_permission).
-        permisos = [p.clave for p in usuario.rol_obj.permisos] if usuario.rol_obj and usuario.rol_obj.estado == "activo" else []
+        # permisos_cache.rol_info en vez de usuario.rol_obj.permisos -- ver
+        # app/core/permisos_cache.py y auditoria/11-auditoria-360-completa.md, Fase 3/4.
+        info = permisos_cache.rol_info(db, usuario.rol_id) if usuario.rol_id else None
+        permisos = list(info["permisos"]) if info and info["estado"] == "activo" else []
     return MeOut(**UsuarioOut.model_validate(usuario).model_dump(), permisos=permisos)
 
 
