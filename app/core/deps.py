@@ -2,7 +2,7 @@
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.security import decode_access_token
 from app.db.database import get_db
@@ -29,7 +29,16 @@ def get_current_user(
     if not nro_documento:
         raise credentials_error
 
-    usuario = db.query(Usuario).filter(Usuario.nro_documento == nro_documento).first()
+    # joinedload (N-a-1, usuario->rol_obj) + selectinload (N-a-N, rol->permisos) en la misma
+    # consulta -- antes cada pedido autenticado que tocara usuario.rol_obj.permisos (ej.
+    # /api/auth/me) disparaba 2 consultas extra por separado, en el camino más transitado de
+    # toda la API. Ver auditoria/11-auditoria-360-completa.md, Fase 3.
+    usuario = (
+        db.query(Usuario)
+        .options(joinedload(Usuario.rol_obj).selectinload(Rol.permisos))
+        .filter(Usuario.nro_documento == nro_documento)
+        .first()
+    )
     if usuario is None or not usuario.activo:
         raise credentials_error
     return usuario

@@ -6,7 +6,7 @@ borrar porque el backend depende de que 'admin' exista siempre como válvula de 
 nombre del rol como string. Sus permisos sí se pueden editar libremente."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.audit import log_evento as _log_evento
 from app.core.deps import get_current_user, require_permission
@@ -36,7 +36,14 @@ def listar_roles(db: Session = Depends(get_db), usuario: Usuario = Depends(get_c
     # Lectura abierta a cualquier usuario autenticado (no solo pantalla:roles): la
     # pantalla de Usuarios también necesita esta lista para el selector de rol al
     # crear/editar, aunque ese rol no tenga acceso a la administración de roles en sí.
-    return [_rol_out(r) for r in db.query(Rol).order_by(Rol.nombre).all()]
+    #
+    # selectinload (N-a-N, rol->permisos): antes _rol_out disparaba 1 consulta extra POR
+    # ROL al leer rol.permisos (N+1 clásico) — ver auditoria/11-auditoria-360-completa.md,
+    # Fase 3. selectinload en vez de joinedload porque hay varias filas padre (Rol) en la
+    # misma consulta -- joinedload multiplicaría filas por cada permiso, selectinload hace
+    # una segunda consulta con IN (...) en vez de eso.
+    roles = db.query(Rol).options(selectinload(Rol.permisos)).order_by(Rol.nombre).all()
+    return [_rol_out(r) for r in roles]
 
 
 @router.post("", response_model=RolOut, status_code=status.HTTP_201_CREATED)
