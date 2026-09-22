@@ -1170,12 +1170,30 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
     cliente ("Check RG Total / IVA 10% / IVA 5% / Exentas"), en vez de comparar solo el
     total — la RG90 no permite validar por "gravada" porque esa columna viene mal
     calculada (incluye el IVA, según Minuta 4).
+
+    Wrapper de compatibilidad sobre reconcile_with_rg90_iter (abajo): agota el generador en
+    una lista. /api/reconcile (main.py) ya NO llama a esta función a 200.000 filas —usa el
+    generador directamente para poder transmitir el resultado en streaming sin retener la
+    lista completa de diffs enriquecidos en memoria (ver auditoria/12, hallazgo de OOM:
+    un pedido de 200k filas hacía que un worker pasara de 130MB a 1,83GB de RSS y muriera).
+    Se deja esta función tal cual para no romper otros llamadores futuros que sí quieran la
+    lista completa de una vez.
     """
     libro_map = {r["doc"]: r for r in libro_rows}
     rg90_map = {r["doc"]: r for r in rg90_rows}
+    return list(reconcile_with_rg90_iter(libro_map, rg90_map))
 
+
+def reconcile_with_rg90_iter(libro_map: Dict[str, Dict[str, Any]], rg90_map: Dict[str, Dict[str, Any]]):
+    """Misma lógica de comparación que reconcile_with_rg90, fila por fila, como generador
+    en vez de una lista — recibe los mapas ya armados (doc -> fila) en vez de las listas,
+    para que quien arma libro_map pueda hacerlo por streaming (ver _parsear_pos_rows_streaming
+    en main.py) sin necesitar nunca una lista de 200.000 filas separada del mapa.
+
+    Las ramas de abajo son EXACTAMENTE las mismas que reconcile_with_rg90 (mismo criterio de
+    negocio, sin cambios) — solo se reemplazó diffs.append(...) por yield ...
+    """
     all_docs = set(libro_map.keys()).union(set(rg90_map.keys()))
-    diffs = []
 
     for doc in sorted(all_docs):
         pos_rec = libro_map.get(doc)
@@ -1186,7 +1204,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 # Un comprobante anulado nunca llega a informarse a la RG90: es el
                 # comportamiento esperado, no una diferencia a revisar (dato confirmado con
                 # archivos reales: 81 de 657 anuladas en Aloha Sheraton, ninguna en RG90).
-                diffs.append({
+                yield {
                     "doc": doc,
                     "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
@@ -1194,9 +1212,9 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "libro": _lado_diff_ventas(pos_rec),
                     "rg90": _lado_diff_ventas(None),
                     "diferencia": "Anulada"
-                })
+                }
                 continue
-            diffs.append({
+            yield {
                 "doc": doc,
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
@@ -1204,9 +1222,9 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 "libro": _lado_diff_ventas(pos_rec),
                 "rg90": _lado_diff_ventas(None),
                 "diferencia": "No llegó a la interfaz"
-            })
+            }
         elif rg_rec and not pos_rec:
-            diffs.append({
+            yield {
                 "doc": doc,
                 "tipo_doc": rg_rec.get("tipo_doc", ""),
                 "sistema": rg_rec.get("sistema", "RG90"),
@@ -1214,7 +1232,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 "libro": _lado_diff_ventas(None),
                 "rg90": _lado_diff_ventas(rg_rec),
                 "diferencia": "No en libro propio"
-            })
+            }
         elif pos_rec and rg_rec:
             # La RG90 siempre informa en valor absoluto (confirmado: tanto el reporte de
             # venta como el de NC del SET traen montos positivos), mientras que el libro
@@ -1229,7 +1247,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
             campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
 
             if campo_diffs:
-                diffs.append({
+                yield {
                     "doc": doc,
                     "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
@@ -1238,9 +1256,9 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Diferencia de monto",
                     "diferencias_detalle": campo_diffs,
-                })
+                }
             elif rg_rec.get("estado", "").lower() == "rechazada":
-                diffs.append({
+                yield {
                     "doc": doc,
                     "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
@@ -1248,9 +1266,9 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "libro": _lado_diff_ventas(pos_rec),
                     "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Rechazada"
-                })
+                }
             elif pos_rec["estado"].lower() == "anulada" or rg_rec.get("estado", "").lower() == "anulada":
-                diffs.append({
+                yield {
                     "doc": doc,
                     "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
@@ -1258,7 +1276,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "libro": _lado_diff_ventas(pos_rec),
                     "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Anulada"
-                })
+                }
             else:
                 # El comprobante coincide (mismo doc en ambos lados, sin diferencia de
                 # monto ni motivo de descarte) — antes no se guardaba nada acá, así que la
@@ -1266,7 +1284,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                 # resta (total - el resto de las categorías) y al presionarla no mostraba
                 # nada. Ahora queda como una categoría más de "diferencia", igual que las
                 # demás, para que el botón funcione igual que el resto de las tarjetas.
-                diffs.append({
+                yield {
                     "doc": doc,
                     "tipo_doc": pos_rec.get("tipo_doc", ""),
                     "sistema": pos_rec["sistema"],
@@ -1274,9 +1292,7 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
                     "libro": _lado_diff_ventas(pos_rec),
                     "rg90": _lado_diff_ventas(rg_rec),
                     "diferencia": "Coincide"
-                })
-
-    return diffs
+                }
 
 
 def _lado_diff_ventas(rec: Dict[str, Any] | None) -> Dict[str, str]:
