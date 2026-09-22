@@ -1,6 +1,6 @@
 """Export a Excel armado en el servidor — para grillas que pueden llegar a 200.000 filas.
 
-Por qué esto vive en el backend y no en el navegador (ver auditoria/12-export-excel-wysiwyg.md):
+Por qué esto vive en el backend y no en el navegador (ver auditoria/13-export-excel-wysiwyg.md):
 medido con un archivo real de 200.000 filas, XLSX.write (librería xlsx/SheetJS, la que usa
 el frontend) revienta con "JavaScript heap out of memory" — más de 2GB de heap antes de
 morir — sin importar si corre en el hilo principal o en un Web Worker. No es un problema de

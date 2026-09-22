@@ -1,5 +1,5 @@
 """Schemas del export a Excel server-side (ver app/api/export.py y
-auditoria/12-export-excel-wysiwyg.md) — se usan cuando el volumen de filas hace que armar
+auditoria/13-export-excel-wysiwyg.md) — se usan cuando el volumen de filas hace que armar
 el .xlsx en el navegador (librería xlsx/SheetJS) sea inviable por memoria, no solo por
 bloquear el hilo principal."""
 
