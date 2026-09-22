@@ -646,19 +646,38 @@ class IngestionEngine:
                 break
         return rows, cortes
 
-    def _leer_hoja_openpyxl_streaming(self, file_path: str, sheet_idx: int, hdr_idx: int, usecols, chunk_size: int):
+    def _leer_hoja_en_bloques(self, file_path: str, ext: str, sheet_idx: int, hdr_idx: int, usecols, chunk_size: int):
         """Generador de bloques de hasta chunk_size filas (cada fila, un dict {nombre de
-        columna: valor}) de UNA hoja, leída con openpyxl en modo read_only=True.
+        columna: valor}) de UNA hoja. Bifurca según la extensión REAL del archivo:
 
-        A diferencia de pd.read_excel(engine="calamine") (usado en todo el resto de este
-        archivo, y mucho más rápido para leer una hoja ENTERA de una sola vez — ver
-        auditoria/09), read_only=True de openpyxl parsea el XML de la hoja como un stream
-        real (SAX-like), fila por fila, sin nunca materializar la hoja completa en memoria
-        — es justo lo que hace falta acá, no velocidad. calamine (vía python-calamine) no
-        expone hoy una API de lectura incremental en su binding de Python: su función
-        de lectura entrega la hoja completa de una sola vez, así que no sirve para este
-        propósito aunque sea más rápido para el caso no-streaming.
+        - .xlsx: openpyxl en modo read_only=True. A diferencia de pd.read_excel(engine=
+          "calamine") (usado en todo el resto de este archivo, y mucho más rápido para leer
+          una hoja ENTERA de una sola vez — ver auditoria/09), read_only=True de openpyxl
+          parsea el XML de la hoja como un stream real (SAX-like), fila por fila, sin nunca
+          materializar la hoja completa en memoria — es justo lo que hace falta acá, no
+          velocidad. calamine (vía python-calamine) no expone hoy una API de lectura
+          incremental en su binding de Python: entrega la hoja completa de una sola vez, así
+          que no sirve para esto aunque sea más rápido para el caso no-streaming.
+
+        - .xls: openpyxl NO SOPORTA este formato en absoluto — es un binario BIFF (Excel
+          97-2003), no XML ("openpyxl does not support the old .xls file format, please use
+          xlrd to read this file", el error real que motivó este branch). Se usa xlrd (vía
+          pd.read_excel(engine="xlrd")) para leer la hoja COMPLETA de una sola vez — sin
+          streaming real, pero seguro en memoria de todos modos: .xls tiene un límite FÍSICO
+          de 65.536 filas por hoja (limitación del propio formato binario BIFF, no de xlrd
+          ni de ninguna librería — un .xls no puede tener más filas que eso, punto), muy por
+          debajo de las 200.000 filas que motivaron este generador (alcanzables solo en
+          .xlsx). El DataFrame resultante se trocea en bloques de chunk_size para mantener
+          la misma interfaz de generador que el caso .xlsx.
         """
+        if ext == ".xls":
+            df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_idx, usecols=usecols, engine="xlrd")
+            df.columns = [str(c).strip() for c in df.columns]
+            registros = df.to_dict("records")
+            for i in range(0, len(registros), chunk_size):
+                yield registros[i:i + chunk_size]
+            return
+
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
         try:
             ws = wb.worksheets[sheet_idx]
@@ -689,11 +708,13 @@ class IngestionEngine:
     def ingest_file_streaming(self, file_path: str, profile_id: str, local_name: str = "Local General", chunk_size: int = 5000):
         """Generador — misma lógica de negocio que ingest_file (mismo mapeo de columnas,
         misma función _process_dataframe_vectorizado sin cambiar una línea), pero leyendo
-        el archivo con openpyxl en modo streaming real (ver _leer_hoja_openpyxl_streaming)
-        y aplicando esa lógica en bloques de chunk_size filas en vez de sobre la hoja
-        completa de una sola vez — yield de cada bloque YA procesado (mismo formato de
-        fila que devuelve ingest_file), nunca la hoja entera cargada en memoria al mismo
-        tiempo. No devuelve `cortes` (ver más abajo, por qué).
+        el archivo en modo streaming real cuando el formato lo permite (.xlsx — ver
+        _leer_hoja_en_bloques; .xls no soporta streaming real, ver el docstring de esa
+        función para el porqué, pero tampoco lo necesita) y aplicando esa lógica en bloques
+        de chunk_size filas en vez de sobre la hoja completa de una sola vez — yield de
+        cada bloque YA procesado (mismo formato de fila que devuelve ingest_file), nunca
+        la hoja entera cargada en memoria al mismo tiempo para el caso .xlsx. No devuelve
+        `cortes` (ver más abajo, por qué).
 
         Pensado específicamente para /api/reconcile (ver ese endpoint y
         auditoria/12-certificacion-salud-sistema.md): ingest_file(), sin cambios, seguía
@@ -795,7 +816,7 @@ class IngestionEngine:
                     continue
 
             produjo_alguna = False
-            for chunk_dicts in self._leer_hoja_openpyxl_streaming(file_path, idx, hdr_idx, usecols, chunk_size):
+            for chunk_dicts in self._leer_hoja_en_bloques(file_path, ext, idx, hdr_idx, usecols, chunk_size):
                 extracted_cols = {}
                 for col_spec in mappings:
                     target = col_spec["target_field"]
