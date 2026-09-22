@@ -8,6 +8,8 @@ import gc
 import json
 import logging
 import os
+import shutil
+import sqlite3
 import tempfile
 from typing import List, Optional
 
@@ -26,12 +28,26 @@ from app.api.roles import router as roles_router
 from app.core.audit import log_evento as _log_evento
 from app.core.config import settings
 from app.core.deps import get_current_user
-from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90_iter
+from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90_iter_pares
 from app.core.uploads import guardar_archivo_seguro
 from app.db.database import get_db
 from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Usuario
 
 _logger = logging.getLogger("app.api.reconcile")
+
+try:
+    import ctypes
+    _libc = ctypes.CDLL("libc.so.6")
+
+    def _malloc_trim():
+        """Le pide a glibc que devuelva al sistema operativo la memoria que su allocator
+        tiene libre pero retenida (no la libera Python -- eso ya lo hizo el refcounting/gc
+        normal; esto libera lo que malloc() se quedó "por las dudas" para la próxima
+        asignación). Best-effort: si no es Linux/glibc, no hace nada."""
+        _libc.malloc_trim(0)
+except (OSError, AttributeError):
+    def _malloc_trim():
+        pass
 
 # /api/reconcile categoriza cada diff en una de estas etiquetas (ver
 # reconcile_with_rg90_iter en engine.py) -- solo estas 6 se resumen como contador en
@@ -224,28 +240,20 @@ async def reconcile(
     nota de crédito), que se consolidan antes de comparar — ver Minuta 3: la RG90 se
     descarga en reportes separados por tipo de comprobante.
 
-    REFACTOR POR OOM (ver auditoria/12-certificacion-salud-sistema.md, "Hallazgo crítico"):
-    un pedido de 200.000 filas hacía que este endpoint construyera, todas a la vez, varias
-    copias completas del mismo volumen de datos — el JSON crudo recibido, la lista
-    `pos_rows`, la lista `rg90_rows`, la lista `diffs` (que además duplica campos de ambos
-    lados) y por último el JSON de la respuesta entera — medido en un worker real: RSS de
-    130MB a 1,83GB, muerte sin traceback (OOM-kill). Ahora:
-    - `pos_data_json` llega como ARCHIVO (Blob, ver services/api.ts), no como campo de texto
-      plano — Starlette lo puede recibir en streaming a un spool en disco en vez de
-      bufferearlo entero como un string en RAM.
-    - Se parsea con `ijson` (streaming) directo a `libro_map`, sin pasar por una lista
-      `pos_rows` intermedia ni por `json.loads()` del documento completo.
-    - `reconcile_with_rg90_iter` (engine.py) es la MISMA lógica de comparación de siempre,
-      pero como generador: nunca existe una lista `diffs` con las 200.000 filas enriquecidas
-      completas al mismo tiempo.
-    - La respuesta se arma con `StreamingResponse`, escribiendo el JSON manualmente a medida
-      que se van generando los diffs (chunks), en vez de construir el dict de respuesta
-      entero y dejar que FastAPI lo serialice de una sola vez.
-    - `gc.collect()` explícito cada 20.000 filas, pedido así aunque el CPython de referencia
-      ya libera por refcounting la mayoría de esto sin ayuda — sirve igual para forzar la
-      recolección de basura cíclica y no cuesta casi nada frente al resto del trabajo.
-    La lógica de negocio (qué se considera diferencia, cómo se arma cada campo) no cambió
-    una sola línea — ver reconcile_with_rg90_iter en engine.py, son las mismas ramas.
+    REFACTOR POR OOM, segunda vuelta (ver auditoria/12-certificacion-salud-sistema.md,
+    "Hallazgo crítico" y su primera "Actualización"): la primera vuelta (streaming con
+    ijson + generador + StreamingResponse) eliminó el OOM-kill (0 caídas en varias
+    corridas de 200.000 filas, contra 3/3 antes) pero el pico de RAM solo bajó de 1,83GB a
+    ~1,49GB — quedaba lejos del objetivo. La razón: el JOIN en sí (`libro_map`/`rg90_map`
+    completos y simultáneos en Python, para poder hacer `.get(doc)` de cada lado) es un
+    piso de memoria que ningún streaming de la SALIDA podía bajar.
+
+    Esta vuelta saca el CRUCE (el emparejamiento por `doc`) a una base SQLite temporal, de
+    un solo uso por pedido, en disco (no `:memory:` — un SQLite en memoria seguiría
+    contando como RSS del proceso, no resolvería nada). SQLite solo empareja `doc` con
+    `doc`; la lógica de negocio (qué es una diferencia, de qué tipo, cómo se arma cada
+    campo) sigue siendo Python puro, sin cambios — ver `_comparar_par` en engine.py, la
+    misma función que ya usaban las dos vueltas anteriores del refactor.
     """
     form = await request.form(max_part_size=FORM_MAX_PART_SIZE)
     rg90_files = form.getlist("rg90_files")
@@ -255,33 +263,102 @@ async def reconcile(
     lote_id_raw = form.get("lote_id")
     lote_id = int(lote_id_raw) if lote_id_raw else None
 
-    # Envuelve la parte NO transmitida todavía (lectura del libro + de la RG90): acá sí se
-    # puede seguir devolviendo un HTTPException limpio, porque todavía no se mandó ningún
-    # byte de la respuesta. Una vez que arranca el streaming (más abajo) ya no se puede.
+    # Base SQLite temporal, un directorio por pedido, borrado siempre en el finally de
+    # _generar_respuesta() más abajo (o acá mismo si algo falla antes de llegar a esa
+    # parte). Nunca ':memory:' -- eso seguiría siendo RAM del proceso, no bajaría nada.
+    tmp_dir_sqlite = tempfile.mkdtemp(prefix="reconcile_sqlite_")
+    db_path = os.path.join(tmp_dir_sqlite, "cruce.sqlite3")
+    # check_same_thread=False: StreamingResponse corre el generador _generar_respuesta en
+    # un thread del threadpool de anyio (Starlette hace esto para no bloquear el event
+    # loop), distinto al thread donde se abre esta conexión -- sin este flag, sqlite3
+    # rechaza usarla ("SQLite objects created in a thread can only be used in that same
+    # thread"). El uso sigue siendo secuencial (un solo thread a la vez toca `con`: primero
+    # este, después el del generador), nunca concurrente, así que es seguro desactivar el
+    # chequeo.
+    con = sqlite3.connect(db_path, check_same_thread=False)
+    # journal_mode=OFF y synchronous=OFF: este archivo vive UNA sola petición y se borra
+    # en el finally pase lo que pase -- no hay nada que proteger contra un corte de luz a
+    # mitad de escritura, así que no tiene sentido pagar el costo de journaling/fsync que
+    # sí hace falta en una base persistente de verdad.
+    con.execute("PRAGMA journal_mode=OFF")
+    con.execute("PRAGMA synchronous=OFF")
+    # "doc TEXT PRIMARY KEY" ya crea el índice único sobre esa columna -- no hace falta un
+    # CREATE INDEX aparte, sería redundante.
+    con.execute("CREATE TABLE libro (doc TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    con.execute("CREATE TABLE rg90 (doc TEXT PRIMARY KEY, data TEXT NOT NULL)")
+
     try:
-        # Parseo en streaming de pos_data_json directo a libro_map -- nunca existe una
-        # lista `pos_rows` de 200.000 dicts por separado del mapa, y el archivo se lee en
-        # bloques desde su spool en disco (SpooledTemporaryFile), no como un string de
-        # ~100MB ya reconstruido entero en memoria.
-        libro_map: dict = {}
-        cantidad_comprobantes = 0
         try:
+            # Carga en streaming: ijson va entregando filas del archivo (nunca el
+            # documento completo en memoria) y se insertan en lotes de INSERT_BATCH filas
+            # por executemany -- nunca existe un `libro_map`/lista de 200.000 dicts en
+            # Python al mismo tiempo, solo el lote chico que se está por insertar.
+            INSERT_BATCH = 5000
+            cantidad_comprobantes = 0
+            lote_insert: list[tuple] = []
             pos_data_file.file.seek(0)
             # use_float=True: por defecto ijson devuelve los números como decimal.Decimal
-            # (para no perder precisión al parsear en streaming) en vez de float como hacía
-            # json.loads() -- sin esto, _monto_diff() revienta con TypeError al restar un
-            # Decimal (de acá) contra un float (de engine.ingest_file, sin cambios, sigue
-            # devolviendo float) apenas se compara un comprobante que existe en ambos lados.
+            # en vez de float como hacía json.loads() -- sin esto, _monto_diff() revienta
+            # con TypeError al restar un Decimal (de acá) contra un float (del lado RG90).
             for row in ijson.items(pos_data_file.file, "item", use_float=True):
-                libro_map[row["doc"]] = row
+                lote_insert.append((row["doc"], json.dumps(row)))
                 cantidad_comprobantes += 1
+                if len(lote_insert) >= INSERT_BATCH:
+                    con.executemany("INSERT INTO libro (doc, data) VALUES (?, ?)", lote_insert)
+                    lote_insert.clear()
+            if lote_insert:
+                con.executemany("INSERT INTO libro (doc, data) VALUES (?, ?)", lote_insert)
+                lote_insert.clear()
         except (ValueError, KeyError) as e:
             raise HTTPException(status_code=422, detail=f"El libro enviado para comparar no tiene el formato esperado: {e}")
         finally:
             await pos_data_file.close()
 
-        rg90_rows = []
+        # Lectura de la(s) RG90 -- SIN CAMBIOS, sigue siendo engine.ingest_file tal cual
+        # (motor de parseo de Excel), sin cambiar ni una línea de ese archivo. En vez de
+        # ingest_file() (que devuelve la RG90 completa como una lista, el remanente de RSS
+        # medido en la vuelta anterior de este refactor), se usa ingest_file_streaming()
+        # (nueva, ver engine.py): lee el .xlsx con openpyxl en modo streaming real (nunca
+        # la hoja completa en memoria) y aplica la MISMA lógica vectorizada por bloques.
+        # Cada bloque se inserta en SQLite y se descarta antes de leer el siguiente --
+        # nunca existe una lista de 200.000 filas completas de la RG90 en memoria.
         loop = asyncio.get_event_loop()
+
+        def _leer_e_insertar_rg90(tmp_path: str) -> tuple:
+            """Corre en un thread del executor (ver más abajo) -- ingest_file_streaming es
+            trabajo sincrónico (pandas/openpyxl) igual que ingest_file antes, así que se
+            saca del event loop de la misma forma. Los inserts a SQLite van acá adentro
+            (no en el hilo del event loop) para no tener que ir y volver por cada bloque.
+            check_same_thread=False en la conexión permite este uso secuencial desde otro
+            thread (nunca concurrente con el hilo que abrió `con`)."""
+            total = 0
+            # Lista liviana (solo los 4 campos que detect_sequence_gaps realmente usa para
+            # ventas: doc, tipo_doc, local, sistema) en vez de las filas completas (~15-20
+            # campos cada una) — detect_sequence_gaps necesita ver todas las filas juntas
+            # para agrupar por serie y ordenar, no se puede resolver por streaming sin
+            # tocar esa función (fuera de alcance), pero no hace falta cargarla con los
+            # campos de montos que no usa.
+            gaps_input = []
+            for i, chunk in enumerate(engine.ingest_file_streaming(tmp_path, "rg90_set", "RG90 SET"), start=1):
+                con.executemany("INSERT INTO rg90 (doc, data) VALUES (?, ?)", [(r["doc"], json.dumps(r)) for r in chunk])
+                gaps_input.extend({"doc": r["doc"], "tipo_doc": r["tipo_doc"], "local": r["local"], "sistema": r["sistema"]} for r in chunk)
+                total += len(chunk)
+                # gc.collect() + malloc_trim() cada 10 bloques: la subida de RSS medida acá
+                # durante la lectura no venía de datos vivos creciendo sin límite (cada
+                # chunk se descarta al terminar la iteración) sino de fragmentación del
+                # heap de C -- pandas/numpy arman y liberan varios arrays temporales por
+                # chunk (_process_dataframe_vectorizado), y glibc no siempre devuelve esas
+                # páginas al sistema operativo por su cuenta aunque el objeto Python ya
+                # esté libre. malloc_trim(0) se lo pide explícitamente.
+                if i % 10 == 0:
+                    gc.collect()
+                    _malloc_trim()
+            gc.collect()
+            _malloc_trim()
+            return total, gaps_input
+
+        rg90_total_rows = 0
+        rg90_gaps_input: list = []
         with tempfile.TemporaryDirectory() as tmp_dir:
             for rg90_file in rg90_files:
                 tmp_path = await guardar_archivo_seguro(rg90_file, tmp_dir)
@@ -290,19 +367,27 @@ async def reconcile(
                 # tumbar el pedido entero con un 500 genérico — se informa qué archivo falló
                 # y por qué.
                 try:
-                    rg90_file_rows, _rg90_cortes = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "rg90_set", "RG90 SET")
+                    total_archivo, gaps_input_archivo = await loop.run_in_executor(None, _leer_e_insertar_rg90, tmp_path)
                 except ValueError as e:
                     raise HTTPException(status_code=422, detail=f"Error al procesar el archivo RG90 '{rg90_file.filename}': {e}")
-                rg90_rows.extend(rg90_file_rows)
+                rg90_total_rows += total_archivo
+                rg90_gaps_input.extend(gaps_input_archivo)
 
-        rg90_map = {r["doc"]: r for r in rg90_rows}
-
+        con.commit()
         # Saltos de numeración DENTRO de la RG90 misma (no contra el libro propio) — mismo
-        # detector que ya usa /api/ingest sobre el libro propio, para el Paso 3 (Adjuntar RG90).
-        rg90_gaps = detect_sequence_gaps(rg90_rows)
+        # detector que ya usa /api/ingest sobre el libro propio, para el Paso 3 (Adjuntar
+        # RG90). Sin cambios en detect_sequence_gaps -- solo recibe una versión más chica
+        # de cada fila (ver comentario de gaps_input arriba).
+        rg90_gaps = detect_sequence_gaps(rg90_gaps_input)
+        del rg90_gaps_input
+        gc.collect()
     except HTTPException:
+        con.close()
+        shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
         raise
     except Exception as e:
+        con.close()
+        shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Error inesperado al leer los archivos para comparar ({type(e).__name__}): {e}")
 
     nombres_rg90 = ", ".join(f.filename for f in rg90_files)
@@ -342,11 +427,14 @@ async def reconcile(
                     return resultado
                 return None
 
-            _push('{"success": true, "rg90_total_rows": %d, "rg90_rows": [' % len(rg90_rows))
-            for idx, r in enumerate(rg90_rows):
+            _push('{"success": true, "rg90_total_rows": %d, "rg90_rows": [' % rg90_total_rows)
+            # ORDER BY rowid preserva el orden de inserción (= orden original del archivo
+            # RG90) -- "doc" no está garantizado alfabético/cronológico, y el Paso 3 del
+            # frontend espera ver la lista tal como venía del archivo.
+            for idx, (data,) in enumerate(con.execute("SELECT data FROM rg90 ORDER BY rowid")):
                 if idx:
                     _push(",")
-                _push(json.dumps(r))
+                _push(data)  # ya es JSON serializado (se guardó con json.dumps al insertar)
                 chunk = _flush_si_corresponde()
                 if chunk is not None:
                     yield chunk
@@ -354,8 +442,35 @@ async def reconcile(
             _push(json.dumps(rg90_gaps))
             _push(', "diffs": [')
 
+            # EL CRUCE: FULL OUTER JOIN por "doc", simulado con LEFT JOIN + UNION ALL
+            # porque esta instancia de SQLite (3.37) es anterior a la 3.39, que agregó
+            # soporte nativo para FULL OUTER JOIN. UNION ALL (no UNION) porque "doc" ya es
+            # PRIMARY KEY en ambas tablas -- no hay riesgo de duplicados, y evita el costo
+            # extra de deduplicar que haría un UNION simple. SQLite solo empareja filas acá
+            # adentro: la comparación de montos/estados sigue pasando en Python, fila por
+            # fila, más abajo (_comparar_par en engine.py) -- nada de lógica de negocio se
+            # movió a SQL.
+            cursor_join = con.execute("""
+                SELECT l.doc, l.data, r.data
+                FROM libro l LEFT JOIN rg90 r ON l.doc = r.doc
+                UNION ALL
+                SELECT r.doc, NULL, r.data
+                FROM rg90 r LEFT JOIN libro l ON l.doc = r.doc
+                WHERE l.doc IS NULL
+                ORDER BY 1
+            """)  # ORDER BY 1 (posición, no nombre): SQLite no siempre resuelve el nombre
+            # de columna de un UNION ALL de forma confiable ("1st ORDER BY term does not
+            # match any column in the result set" con ORDER BY doc) -- por posición
+            # funciona siempre.
+
+            def _pares_desde_sqlite():
+                for doc, libro_json, rg90_json in cursor_join:
+                    pos_rec = json.loads(libro_json) if libro_json is not None else None
+                    rg_rec = json.loads(rg90_json) if rg90_json is not None else None
+                    yield doc, pos_rec, rg_rec
+
             total_diffs = 0
-            for total_diffs, d in enumerate(reconcile_with_rg90_iter(libro_map, rg90_map), start=1):
+            for total_diffs, d in enumerate(reconcile_with_rg90_iter_pares(_pares_desde_sqlite()), start=1):
                 if total_diffs > 1:
                     _push(",")
                 _push(json.dumps(d))
@@ -367,6 +482,7 @@ async def reconcile(
                     yield chunk
                 if total_diffs % 20000 == 0:
                     gc.collect()
+                    _malloc_trim()
 
             _push('], "summary": ')
             _push(json.dumps(counts))
@@ -416,7 +532,11 @@ async def reconcile(
             _logger.exception("Error durante el streaming de /api/reconcile (respuesta quedó truncada para el cliente)")
             raise
         finally:
-            libro_map.clear()
+            # Limpieza obligatoria de la base SQLite temporal -- se cierra la conexión y se
+            # borra el directorio entero (el .sqlite3 y cualquier -journal/-wal/-shm que
+            # SQLite haya llegado a crear), pase lo que pase.
+            con.close()
+            shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
             gc.collect()
 
     return StreamingResponse(_generar_respuesta(), media_type="application/json")

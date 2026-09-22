@@ -9,6 +9,7 @@ import json
 import unicodedata
 from datetime import datetime, date
 import numpy as np
+import openpyxl
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 from app.core.date_parser import parse_date, format_display_date, DATE_FORMATS
@@ -645,6 +646,176 @@ class IngestionEngine:
                 break
         return rows, cortes
 
+    def _leer_hoja_openpyxl_streaming(self, file_path: str, sheet_idx: int, hdr_idx: int, usecols, chunk_size: int):
+        """Generador de bloques de hasta chunk_size filas (cada fila, un dict {nombre de
+        columna: valor}) de UNA hoja, leída con openpyxl en modo read_only=True.
+
+        A diferencia de pd.read_excel(engine="calamine") (usado en todo el resto de este
+        archivo, y mucho más rápido para leer una hoja ENTERA de una sola vez — ver
+        auditoria/09), read_only=True de openpyxl parsea el XML de la hoja como un stream
+        real (SAX-like), fila por fila, sin nunca materializar la hoja completa en memoria
+        — es justo lo que hace falta acá, no velocidad. calamine (vía python-calamine) no
+        expone hoy una API de lectura incremental en su binding de Python: su función
+        de lectura entrega la hoja completa de una sola vez, así que no sirve para este
+        propósito aunque sea más rápido para el caso no-streaming.
+        """
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            ws = wb.worksheets[sheet_idx]
+            filas = ws.iter_rows(values_only=True)
+            for _ in range(hdr_idx):
+                next(filas, None)
+            header_row = next(filas, None)
+            if header_row is None:
+                return
+            columnas = [str(c).strip() if c is not None else f"__col{i}__" for i, c in enumerate(header_row)]
+            if usecols is not None:
+                indices_usar = [i for i, c in enumerate(columnas) if usecols(c)]
+            else:
+                indices_usar = list(range(len(columnas)))
+            nombres_usar = [columnas[i] for i in indices_usar]
+
+            chunk: List[Dict[str, Any]] = []
+            for row in filas:
+                chunk.append({nombres_usar[j]: (row[i] if i < len(row) else None) for j, i in enumerate(indices_usar)})
+                if len(chunk) >= chunk_size:
+                    yield chunk
+                    chunk = []
+            if chunk:
+                yield chunk
+        finally:
+            wb.close()
+
+    def ingest_file_streaming(self, file_path: str, profile_id: str, local_name: str = "Local General", chunk_size: int = 5000):
+        """Generador — misma lógica de negocio que ingest_file (mismo mapeo de columnas,
+        misma función _process_dataframe_vectorizado sin cambiar una línea), pero leyendo
+        el archivo con openpyxl en modo streaming real (ver _leer_hoja_openpyxl_streaming)
+        y aplicando esa lógica en bloques de chunk_size filas en vez de sobre la hoja
+        completa de una sola vez — yield de cada bloque YA procesado (mismo formato de
+        fila que devuelve ingest_file), nunca la hoja entera cargada en memoria al mismo
+        tiempo. No devuelve `cortes` (ver más abajo, por qué).
+
+        Pensado específicamente para /api/reconcile (ver ese endpoint y
+        auditoria/12-certificacion-salud-sistema.md): ingest_file(), sin cambios, seguía
+        reteniendo las 200.000 filas de la RG90 como una lista completa en memoria — era
+        el remanente de RSS medido después de sacar el cruce libro↔RG90 a SQLite. Esta
+        función es una RUTA NUEVA Y PARALELA — ingest_file() no cambió ni una línea, ni su
+        firma ni su comportamiento por defecto, y sigue siendo la que usan /api/ingest,
+        /api/compras/* y el resto de /api/reconcile (el lado libro, ya resuelto con ijson).
+
+        Alcance deliberadamente más chico que ingest_file(), por diseño, no por descuido:
+        - Solo .xls/.xlsx (la RG90 siempre es Excel, ver Minuta 3 — CSV no aplica acá).
+        - Solo perfiles SIN section_marker_col (el único que lo usa, Aloha, necesita
+          estado entre filas para separar facturas de notas de crédito fila a fila — no
+          tiene sentido partido en bloques independientes). rg90_set y universal
+          califican (ver sus .json, ninguno declara marker_col).
+        - Solo perfiles cuyos column_mappings mapean por source_name (no source_col
+          posicional) — rg90_set y universal también califican; Aloha/Hiopos usan
+          source_col, pero ya quedan afuera por el punto anterior (ambos declaran
+          marker_col también).
+        - No corre _repair_embedded_rows: ese arreglo es para celdas con saltos de línea
+          por edición manual del archivo — su propio docstring documenta que "en la
+          totalidad de los reportes oficiales de la RG90/RG, que no pasan por edición
+          manual" no hay nada que reparar. No aplica a este flujo por diseño del reporte
+          en sí, no por una limitación de esta función.
+        - No calcula `cortes` (saltos de numeración vía cortes/subtotales): ese concepto
+          es exclusivo del formato Aloha (con marker_col), que ya está excluido arriba.
+        Si en algún momento hace falta usar esto para un perfil que no cumpla estas
+        condiciones, hay que extenderlo a propósito — se prefirió no generalizar de más
+        sin un caso real que lo pida.
+        """
+        profile = self.profiles.get(profile_id)
+        if not profile:
+            raise ValueError(f"Perfil '{profile_id}' no encontrado.")
+        if profile.get("section_marker_col") is not None:
+            raise ValueError(f"ingest_file_streaming no soporta el perfil '{profile_id}' (usa section_marker_col) — usar ingest_file().")
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in [".xls", ".xlsx"]:
+            raise ValueError("ingest_file_streaming solo soporta archivos .xls/.xlsx.")
+
+        mappings = profile.get("column_mappings", [])
+        if any("source_col" in m for m in mappings):
+            raise ValueError(f"ingest_file_streaming no soporta el perfil '{profile_id}' (mapea columnas por posición, source_col) — usar ingest_file().")
+
+        hdr_idx = profile.get("header_row_index", 0)
+        preferred_sheet = profile.get("sheet_index", 0)
+
+        # Selección de hoja candidata: MISMO criterio que ingest_file (firma del perfil,
+        # prefer_sheet_name/require_exact_sheet_name, fallback probando el resto de las
+        # hojas en orden) — reutiliza las mismas funciones auxiliares, sin duplicar la
+        # lógica de decisión, solo cambia CÓMO se lee cada hoja candidata una vez elegida.
+        sheet_names = pd.ExcelFile(file_path, engine="calamine").sheet_names
+        if not _matches_profile_signature(file_path, sheet_names, profile):
+            raise ValueError(
+                f"El archivo no parece corresponder al formato de {profile['name']}. "
+                f"Verificá que elegiste el sistema correcto para este reporte."
+            )
+
+        prefer_name = str(profile.get("prefer_sheet_name", "")).strip().lower()
+        candidatos: List[int] = []
+        if prefer_name:
+            for i, name in enumerate(sheet_names):
+                if str(name).strip().lower() == prefer_name:
+                    candidatos.append(i)
+                    break
+        if profile.get("require_exact_sheet_name") and not candidatos:
+            raise ValueError(
+                f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
+                f"verificá que sea el archivo correcto para {profile['name']}."
+            )
+        if profile.get("require_exact_sheet_name"):
+            candidatos = candidatos[:1]
+        else:
+            candidatos += [preferred_sheet] + [i for i in range(len(sheet_names)) if i != preferred_sheet and i not in candidatos]
+
+        usecols = _usecols_para_perfil(profile)
+        nombres_esperados = _nombres_columnas_perfil(profile)
+        target_fields = {m["target_field"] for m in mappings}
+        usa_clasificacion_tasa = "gravada_bruta" in target_fields
+        permitidos_norm = (
+            {_normalizar_tipo(t) for t in profile.get("tipo_documento_permitidos")}
+            if profile.get("tipo_documento_permitidos") is not None else None
+        )
+        notas_credito_por_tipo = {_normalizar_tipo(t) for t in profile.get("tipo_documento_notas_credito", [])}
+        serie_prefijos = profile.get("serie_prefijos_no_fiscales", [])
+
+        for idx in candidatos:
+            if idx >= len(sheet_names):
+                continue
+
+            # Mismo espionaje barato del encabezado que ingest_file, antes de leer la hoja
+            # entera — acá igual de válido: nrows=0 no carga ninguna fila de datos.
+            if len(candidatos) > 1 and nombres_esperados is not None:
+                try:
+                    hdr_df = pd.read_excel(file_path, header=hdr_idx, sheet_name=idx, nrows=0, engine="calamine")
+                except Exception:
+                    hdr_df = None
+                if hdr_df is not None and not (set(hdr_df.columns) & nombres_esperados):
+                    continue
+
+            produjo_alguna = False
+            for chunk_dicts in self._leer_hoja_openpyxl_streaming(file_path, idx, hdr_idx, usecols, chunk_size):
+                extracted_cols = {}
+                for col_spec in mappings:
+                    target = col_spec["target_field"]
+                    c_name = col_spec.get("source_name")
+                    extracted_cols[target] = [row.get(c_name) for row in chunk_dicts]
+                records_df_chunk = pd.DataFrame(extracted_cols)
+                if len(records_df_chunk) == 0:
+                    continue
+                processed_rows, _cortes = self._process_dataframe_vectorizado(
+                    records_df_chunk, profile, local_name, usa_clasificacion_tasa,
+                    permitidos_norm, notas_credito_por_tipo, serie_prefijos,
+                )
+                if processed_rows:
+                    produjo_alguna = True
+                    yield processed_rows
+            if produjo_alguna:
+                return
+        # Ningún candidato produjo filas -- mismo resultado final que ingest_file cuando
+        # ninguna hoja matchea (ahí devuelve rows=[]): acá, simplemente no se yield-ea nada.
+
     def _process_dataframe(self, df: pd.DataFrame, profile: Dict, local_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         mappings = profile.get("column_mappings", [])
         extracted_cols = {}
@@ -1184,115 +1355,131 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
     return list(reconcile_with_rg90_iter(libro_map, rg90_map))
 
 
-def reconcile_with_rg90_iter(libro_map: Dict[str, Dict[str, Any]], rg90_map: Dict[str, Dict[str, Any]]):
-    """Misma lógica de comparación que reconcile_with_rg90, fila por fila, como generador
-    en vez de una lista — recibe los mapas ya armados (doc -> fila) en vez de las listas,
-    para que quien arma libro_map pueda hacerlo por streaming (ver _parsear_pos_rows_streaming
-    en main.py) sin necesitar nunca una lista de 200.000 filas separada del mapa.
-
-    Las ramas de abajo son EXACTAMENTE las mismas que reconcile_with_rg90 (mismo criterio de
-    negocio, sin cambios) — solo se reemplazó diffs.append(...) por yield ...
+def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """La lógica de negocio de la comparación, para UN comprobante a la vez — exactamente
+    las mismas ramas y criterios que tenía reconcile_with_rg90 desde siempre (ver el
+    historial de esa función: control por campo, Anulada, Rechazada, etc.), ahora aisladas
+    en su propia función para poder alimentarlas tanto desde dos mapas completos en memoria
+    (reconcile_with_rg90_iter, abajo) como desde un cursor de un JOIN hecho en SQLite
+    (reconcile_with_rg90_iter_pares, y app/api/main.py) sin duplicar ni una condición.
+    Nunca se movió ningún cálculo a SQL — esta función es la única que decide qué es una
+    diferencia y de qué tipo; SQLite solo empareja `doc`, no sabe nada de montos.
     """
-    all_docs = set(libro_map.keys()).union(set(rg90_map.keys()))
-
-    for doc in sorted(all_docs):
-        pos_rec = libro_map.get(doc)
-        rg_rec = rg90_map.get(doc)
-
-        if pos_rec and not rg_rec:
-            if pos_rec["estado"].lower() == "anulada":
-                # Un comprobante anulado nunca llega a informarse a la RG90: es el
-                # comportamiento esperado, no una diferencia a revisar (dato confirmado con
-                # archivos reales: 81 de 657 anuladas en Aloha Sheraton, ninguna en RG90).
-                yield {
-                    "doc": doc,
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff_ventas(pos_rec),
-                    "rg90": _lado_diff_ventas(None),
-                    "diferencia": "Anulada"
-                }
-                continue
-            yield {
+    if pos_rec and not rg_rec:
+        if pos_rec["estado"].lower() == "anulada":
+            # Un comprobante anulado nunca llega a informarse a la RG90: es el
+            # comportamiento esperado, no una diferencia a revisar (dato confirmado con
+            # archivos reales: 81 de 657 anuladas en Aloha Sheraton, ninguna en RG90).
+            return {
                 "doc": doc,
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
                 "libro": _lado_diff_ventas(pos_rec),
                 "rg90": _lado_diff_ventas(None),
-                "diferencia": "No llegó a la interfaz"
+                "diferencia": "Anulada"
             }
-        elif rg_rec and not pos_rec:
-            yield {
-                "doc": doc,
-                "tipo_doc": rg_rec.get("tipo_doc", ""),
-                "sistema": rg_rec.get("sistema", "RG90"),
-                "local": rg_rec.get("local", "Desconocido"),
-                "libro": _lado_diff_ventas(None),
-                "rg90": _lado_diff_ventas(rg_rec),
-                "diferencia": "No en libro propio"
-            }
-        elif pos_rec and rg_rec:
-            # La RG90 siempre informa en valor absoluto (confirmado: tanto el reporte de
-            # venta como el de NC del SET traen montos positivos), mientras que el libro
-            # propio ahora guarda las notas de crédito en negativo (para que "Total Neto" dé
-            # la venta neta real). El control contra la RG90 compara magnitudes, no signo.
-            campo_diffs = {
-                "total": _monto_diff(abs(pos_rec["total_num"]), rg_rec["total_num"]),
-                "iva_10": _monto_diff(abs(pos_rec.get("iva_num", 0.0)), rg_rec.get("iva_num", 0.0)),
-                "iva_5": _monto_diff(abs(pos_rec.get("iva_5_num", 0.0)), rg_rec.get("iva_5_num", 0.0)),
-                "exenta": _monto_diff(abs(pos_rec.get("exentas_num", 0.0)), rg_rec.get("exentas_num", 0.0)),
-            }
-            campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
+        return {
+            "doc": doc,
+            "tipo_doc": pos_rec.get("tipo_doc", ""),
+            "sistema": pos_rec["sistema"],
+            "local": pos_rec["local"],
+            "libro": _lado_diff_ventas(pos_rec),
+            "rg90": _lado_diff_ventas(None),
+            "diferencia": "No llegó a la interfaz"
+        }
+    elif rg_rec and not pos_rec:
+        return {
+            "doc": doc,
+            "tipo_doc": rg_rec.get("tipo_doc", ""),
+            "sistema": rg_rec.get("sistema", "RG90"),
+            "local": rg_rec.get("local", "Desconocido"),
+            "libro": _lado_diff_ventas(None),
+            "rg90": _lado_diff_ventas(rg_rec),
+            "diferencia": "No en libro propio"
+        }
+    else:
+        # La RG90 siempre informa en valor absoluto (confirmado: tanto el reporte de
+        # venta como el de NC del SET traen montos positivos), mientras que el libro
+        # propio ahora guarda las notas de crédito en negativo (para que "Total Neto" dé
+        # la venta neta real). El control contra la RG90 compara magnitudes, no signo.
+        campo_diffs = {
+            "total": _monto_diff(abs(pos_rec["total_num"]), rg_rec["total_num"]),
+            "iva_10": _monto_diff(abs(pos_rec.get("iva_num", 0.0)), rg_rec.get("iva_num", 0.0)),
+            "iva_5": _monto_diff(abs(pos_rec.get("iva_5_num", 0.0)), rg_rec.get("iva_5_num", 0.0)),
+            "exenta": _monto_diff(abs(pos_rec.get("exentas_num", 0.0)), rg_rec.get("exentas_num", 0.0)),
+        }
+        campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
 
-            if campo_diffs:
-                yield {
-                    "doc": doc,
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff_ventas(pos_rec),
-                    "rg90": _lado_diff_ventas(rg_rec),
-                    "diferencia": "Diferencia de monto",
-                    "diferencias_detalle": campo_diffs,
-                }
-            elif rg_rec.get("estado", "").lower() == "rechazada":
-                yield {
-                    "doc": doc,
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff_ventas(pos_rec),
-                    "rg90": _lado_diff_ventas(rg_rec),
-                    "diferencia": "Rechazada"
-                }
-            elif pos_rec["estado"].lower() == "anulada" or rg_rec.get("estado", "").lower() == "anulada":
-                yield {
-                    "doc": doc,
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff_ventas(pos_rec),
-                    "rg90": _lado_diff_ventas(rg_rec),
-                    "diferencia": "Anulada"
-                }
-            else:
-                # El comprobante coincide (mismo doc en ambos lados, sin diferencia de
-                # monto ni motivo de descarte) — antes no se guardaba nada acá, así que la
-                # tarjeta "Coinciden" no tenía ninguna fila real detrás: se calculaba por
-                # resta (total - el resto de las categorías) y al presionarla no mostraba
-                # nada. Ahora queda como una categoría más de "diferencia", igual que las
-                # demás, para que el botón funcione igual que el resto de las tarjetas.
-                yield {
-                    "doc": doc,
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff_ventas(pos_rec),
-                    "rg90": _lado_diff_ventas(rg_rec),
-                    "diferencia": "Coincide"
-                }
+        if campo_diffs:
+            return {
+                "doc": doc,
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
+                "sistema": pos_rec["sistema"],
+                "local": pos_rec["local"],
+                "libro": _lado_diff_ventas(pos_rec),
+                "rg90": _lado_diff_ventas(rg_rec),
+                "diferencia": "Diferencia de monto",
+                "diferencias_detalle": campo_diffs,
+            }
+        elif rg_rec.get("estado", "").lower() == "rechazada":
+            return {
+                "doc": doc,
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
+                "sistema": pos_rec["sistema"],
+                "local": pos_rec["local"],
+                "libro": _lado_diff_ventas(pos_rec),
+                "rg90": _lado_diff_ventas(rg_rec),
+                "diferencia": "Rechazada"
+            }
+        elif pos_rec["estado"].lower() == "anulada" or rg_rec.get("estado", "").lower() == "anulada":
+            return {
+                "doc": doc,
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
+                "sistema": pos_rec["sistema"],
+                "local": pos_rec["local"],
+                "libro": _lado_diff_ventas(pos_rec),
+                "rg90": _lado_diff_ventas(rg_rec),
+                "diferencia": "Anulada"
+            }
+        else:
+            # El comprobante coincide (mismo doc en ambos lados, sin diferencia de
+            # monto ni motivo de descarte) — antes no se guardaba nada acá, así que la
+            # tarjeta "Coinciden" no tenía ninguna fila real detrás: se calculaba por
+            # resta (total - el resto de las categorías) y al presionarla no mostraba
+            # nada. Ahora queda como una categoría más de "diferencia", igual que las
+            # demás, para que el botón funcione igual que el resto de las tarjetas.
+            return {
+                "doc": doc,
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
+                "sistema": pos_rec["sistema"],
+                "local": pos_rec["local"],
+                "libro": _lado_diff_ventas(pos_rec),
+                "rg90": _lado_diff_ventas(rg_rec),
+                "diferencia": "Coincide"
+            }
+
+
+def reconcile_with_rg90_iter(libro_map: Dict[str, Dict[str, Any]], rg90_map: Dict[str, Dict[str, Any]]):
+    """Misma lógica de comparación que reconcile_with_rg90, fila por fila, como generador
+    en vez de una lista — recibe los mapas ya armados (doc -> fila) en vez de las listas.
+    Wrapper delgado sobre _comparar_par, para quien todavía tenga ambos mapas completos en
+    memoria (ya no es el caso de /api/reconcile, que desde el cruce por SQLite usa
+    reconcile_with_rg90_iter_pares en su lugar — se deja esta función para no romper otros
+    posibles llamadores que sí quieran pasar los mapas directo)."""
+    all_docs = set(libro_map.keys()).union(set(rg90_map.keys()))
+    for doc in sorted(all_docs):
+        yield _comparar_par(doc, libro_map.get(doc), rg90_map.get(doc))
+
+
+def reconcile_with_rg90_iter_pares(pares):
+    """Misma lógica de comparación, para pares (doc, pos_rec_o_None, rg_rec_o_None) ya
+    emparejados de antemano — pensado para recibir directo el cursor de un JOIN hecho en
+    SQLite (ver /api/reconcile en main.py), sin necesitar los dos mapas completos en
+    memoria de Python al mismo tiempo. Es la misma lógica de negocio que
+    reconcile_with_rg90_iter, solo cambia de dónde vienen los pares ya casados."""
+    for doc, pos_rec, rg_rec in pares:
+        yield _comparar_par(doc, pos_rec, rg_rec)
 
 
 def _lado_diff_ventas(rec: Dict[str, Any] | None) -> Dict[str, str]:
