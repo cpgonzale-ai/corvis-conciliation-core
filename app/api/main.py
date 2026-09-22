@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.api.auditoria import router as auditoria_router
 from app.api.auth import router as auth_router
@@ -260,6 +261,31 @@ async def reconcile(
     pos_data_file = form.get("pos_data_json")
     if not rg90_files or pos_data_file is None:
         raise HTTPException(status_code=422, detail="Faltan los archivos de RG90 o el libro a comparar.")
+    # pos_data_json tiene que llegar como ARCHIVO (Blob), no como campo de texto plano --
+    # FormData.get() de Starlette devuelve un str si el campo llegó como texto (ej. un
+    # frontend desplegado ANTES de este cambio, que todavía hace
+    # formData.append('pos_data_json', JSON.stringify(...)) sin envolverlo en un Blob).
+    # Sin este chequeo, ese caso fallaba más abajo con un AttributeError confuso
+    # ('str' object has no attribute 'close', en el finally que cierra el UploadFile) en
+    # vez de decir con claridad qué es lo que realmente está mal.
+    #
+    # OJO: se chequea contra starlette.datastructures.UploadFile, NO fastapi.UploadFile
+    # (importado arriba, usado en la firma de otros endpoints que reciben File(...) por
+    # inyección de dependencias) -- fastapi.UploadFile es una SUBCLASE de la de Starlette,
+    # y acá el archivo se lee directo de request.form() (sin pasar por esa inyección), que
+    # siempre entrega instancias de la clase BASE de Starlette. isinstance() contra la
+    # subclase de FastAPI da falso incluso con un archivo real (bug propio, encontrado y
+    # corregido en la misma corrida en que se agregó este chequeo).
+    if not isinstance(pos_data_file, StarletteUploadFile):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "El libro a comparar (pos_data_json) llegó como texto plano, no como archivo. "
+                "Esto pasa si el frontend desplegado es anterior al commit que lo manda como Blob "
+                "(services/api.ts, reconcileApi) — verificá que el build de siscom-rg90 en /var/www/siscom "
+                "incluya ese cambio."
+            ),
+        )
     lote_id_raw = form.get("lote_id")
     lote_id = int(lote_id_raw) if lote_id_raw else None
 
