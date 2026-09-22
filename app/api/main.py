@@ -147,6 +147,12 @@ engine = IngestionEngine(PROFILES_DIR)
 # FastAPI no expone ese parámetro a través del descriptor Form().
 FORM_MAX_PART_SIZE = 150 * 1024 * 1024
 
+# Mensaje único para "el archivo no se pudo ni abrir como Excel" (PDF renombrado, archivo
+# corrupto, etc.) -- distinto del mensaje de "no coincide con el perfil esperado" (ese sí
+# es específico por perfil/columnas). Usado tanto en /api/ingest como en /api/reconcile,
+# ver auditoria/14-go-live-readiness.md, Fase 1, hallazgo crítico.
+MSG_ARCHIVO_NO_VALIDO = "El archivo subido no es un Excel válido o está corrupto."
+
 # Auto-detección del sistema de ventas en /api/ingest: el Paso 1 del frontend ya no pide
 # elegir el sistema antes de adjuntar (mismo criterio que /api/compras/ingest, que nunca lo
 # pidió) — se prueba cada perfil, en este orden, hasta encontrar el que matchea la firma de
@@ -234,6 +240,16 @@ async def ingest_files(
                         break
                     except ValueError as e:
                         errores.append(f"{PERFIL_VENTAS_LABEL.get(candidato, candidato)}: {e}")
+                    except Exception:
+                        # El archivo ni siquiera se pudo ABRIR como Excel (ej. un PDF
+                        # renombrado a .xlsx, un archivo corrupto) -- distinto de "no
+                        # coincide con ningún perfil" (ValueError, arriba): acá no tiene
+                        # sentido seguir probando los demás perfiles, todos van a fallar
+                        # con el mismo error de formato. Antes esto se escapaba sin
+                        # atrapar (python_calamine.CalamineError no es ValueError) y
+                        # terminaba en un 500 genérico -- ver hallazgo crítico de
+                        # auditoria/14-go-live-readiness.md, Fase 1.
+                        raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
                 if profile_id is None:
                     raise HTTPException(
                         status_code=422,
@@ -250,6 +266,10 @@ async def ingest_files(
                     # El archivo no corresponde al sistema elegido (firma no encontrada) —
                     # se bloquea acá, antes de crear ningún lote, para que el Paso 1 no avance.
                     raise HTTPException(status_code=422, detail=str(e))
+                except Exception:
+                    # Mismo caso que arriba (rama auto_detectar): el archivo no se pudo
+                    # abrir como Excel en absoluto.
+                    raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
 
             perfil_por_archivo[file.filename] = profile_id
             all_rows.extend(rows)
@@ -471,6 +491,14 @@ async def reconcile(
                     total_archivo, gaps_input_archivo = await loop.run_in_executor(None, _leer_e_insertar_rg90, tmp_path)
                 except ValueError as e:
                     raise HTTPException(status_code=422, detail=f"Error al procesar el archivo RG90 '{rg90_file.filename}': {e}")
+                except Exception:
+                    # El archivo ni siquiera se pudo ABRIR como Excel (PDF renombrado,
+                    # archivo corrupto, etc.) -- python_calamine.CalamineError (calamine,
+                    # usado para el sondeo de hojas) y las excepciones de openpyxl/xlrd
+                    # (lectura en bloques) no son ValueError, así que antes se escapaban
+                    # hasta el except Exception de más abajo y terminaban en un 500
+                    # genérico. Ver auditoria/14-go-live-readiness.md, Fase 1.
+                    raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
                 rg90_total_rows += total_archivo
                 rg90_gaps_input.extend(gaps_input_archivo)
 
