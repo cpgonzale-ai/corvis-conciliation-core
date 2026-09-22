@@ -50,6 +50,72 @@ except (OSError, AttributeError):
     def _malloc_trim():
         pass
 
+
+def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str, lote: list) -> None:
+    """Inserta un lote de (doc, data) en `tabla` (libro o rg90 -- ver más abajo). doc es
+    PRIMARY KEY: el algoritmo de comparación (_comparar_par, engine.py, sin cambios en
+    este refactor) siempre asumió un comprobante por doc -- ya lo hacía el código
+    original con `libro_map = {r["doc"]: r for r in libro_rows}`, que ante un doc repetido
+    se quedaba silenciosamente con la última fila. Permitir duplicados en esta tabla sin
+    tocar esa invariante convertiría el join en un producto cartesiano (un doc con 3 filas
+    en libro × 2 en rg90 compararía 6 pares, no 3) -- un bug de negocio silencioso, peor
+    que fallar ruidosamente. Por eso la PK se mantiene: si el insert choca, se reintenta
+    fila por fila para identificar exactamente qué doc(s) vienen repetidos en el archivo y
+    se corta con un 422 explícito (en vez del IntegrityError de SQLite sin ningún valor
+    concreto), para poder confirmar con el archivo real si es un problema de formato
+    (detalle por ítem en vez de resumen por comprobante) o un dato sucio puntual.
+
+    No usa ROLLBACK ni SAVEPOINT para deshacer el lote fallido a propósito: con
+    journal_mode=OFF (ver más abajo, en la conexión) SQLite deja de poder revertir nada —
+    confirmado, "ROLLBACK TO" simplemente no tiene efecto con el journal desactivado, lo
+    que en un primer intento con esa técnica hacía que el conteo de duplicados diera de
+    más (contaba también la primera fila, que había quedado insertada por el executemany
+    fallido). No hace falta deshacer nada igual: el pedido entero corta con un 422 más
+    abajo, y esta base SQLite temporal se borra completa en el finally del caller — dejar
+    filas insertadas de un lote que terminó fallando no tiene ningún efecto persistente.
+    """
+    try:
+        con.executemany(f"INSERT INTO {tabla} (doc, data) VALUES (?, ?)", lote)
+    except sqlite3.IntegrityError:
+        # Se cuenta cada doc dentro de ESTE lote (Python puro, sin tocar la tabla) -- para
+        # el caso común (líneas de un mismo comprobante seguidas en el archivo, cayendo en
+        # el mismo lote de INSERT_BATCH) esto ya da el conteo exacto de apariciones. El
+        # caso menos común -- un doc repetido pero separado entre dos lotes distintos, que
+        # acá se ve como "aparece 1 sola vez en este lote" -- se detecta aparte: si ese doc
+        # ya existía en la tabla (insertado por un lote anterior), también se reporta,
+        # sin conteo exacto (no vale la pena la complejidad extra por un caso raro).
+        vistos: dict = {}
+        for doc, _ in lote:
+            vistos[doc] = vistos.get(doc, 0) + 1
+        conteos = {doc: n for doc, n in vistos.items() if n > 1}
+        docs_solo_una_vez_en_lote = [doc for doc, n in vistos.items() if n == 1]
+        if docs_solo_una_vez_en_lote:
+            placeholders = ",".join("?" * len(docs_solo_una_vez_en_lote))
+            ya_en_lote_anterior = con.execute(
+                f"SELECT doc FROM {tabla} WHERE doc IN ({placeholders})",
+                docs_solo_una_vez_en_lote,
+            ).fetchall()
+            for (doc,) in ya_en_lote_anterior:
+                conteos[doc] = "más de una vez, en bloques distintos del archivo"
+        if not conteos:
+            raise
+        # conteos mezcla int (conteo exacto, duplicado dentro del mismo lote) con str
+        # (duplicado entre lotes distintos, sin conteo exacto) -- se ordena poniendo los
+        # conteos exactos más altos primero, dejando los aproximados al final.
+        items = sorted(conteos.items(), key=lambda kv: kv[1] if isinstance(kv[1], int) else -1, reverse=True)
+        ejemplos = ", ".join(f"'{doc}' ({n} veces)" if isinstance(n, int) else f"'{doc}' ({n})" for doc, n in items[:5])
+        resto = f" y {len(items) - 5} comprobante(s) más" if len(items) > 5 else ""
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"El archivo tiene comprobantes repetidos en \"{tabla}\": {ejemplos}{resto}. "
+                "La comparación contra la RG90 espera una fila por comprobante, con los montos "
+                "ya totalizados (así es como el RG90/SET los reporta) — si el archivo trae una "
+                "fila por ítem/línea de detalle (ej. distintas tasas de IVA de una misma "
+                "factura), hay que sumarlas en un único total por comprobante antes de subirlo."
+            ),
+        )
+
 # /api/reconcile categoriza cada diff en una de estas etiquetas (ver
 # reconcile_with_rg90_iter en engine.py) -- solo estas 6 se resumen como contador en
 # "summary" (así era también antes de streaming: "Rechazada" queda en el detalle de
@@ -330,10 +396,10 @@ async def reconcile(
                 lote_insert.append((row["doc"], json.dumps(row)))
                 cantidad_comprobantes += 1
                 if len(lote_insert) >= INSERT_BATCH:
-                    con.executemany("INSERT INTO libro (doc, data) VALUES (?, ?)", lote_insert)
+                    _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert)
                     lote_insert.clear()
             if lote_insert:
-                con.executemany("INSERT INTO libro (doc, data) VALUES (?, ?)", lote_insert)
+                _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert)
                 lote_insert.clear()
         except (ValueError, KeyError) as e:
             raise HTTPException(status_code=422, detail=f"El libro enviado para comparar no tiene el formato esperado: {e}")
@@ -366,7 +432,7 @@ async def reconcile(
             # campos de montos que no usa.
             gaps_input = []
             for i, chunk in enumerate(engine.ingest_file_streaming(tmp_path, "rg90_set", "RG90 SET"), start=1):
-                con.executemany("INSERT INTO rg90 (doc, data) VALUES (?, ?)", [(r["doc"], json.dumps(r)) for r in chunk])
+                _insertar_lote_diagnosticando_duplicados(con, "rg90", [(r["doc"], json.dumps(r)) for r in chunk])
                 gaps_input.extend({"doc": r["doc"], "tipo_doc": r["tipo_doc"], "local": r["local"], "sistema": r["sistema"]} for r in chunk)
                 total += len(chunk)
                 # gc.collect() + malloc_trim() cada 10 bloques: la subida de RSS medida acá
