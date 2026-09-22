@@ -1349,9 +1349,13 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
     un pedido de 200k filas hacía que un worker pasara de 130MB a 1,83GB de RSS y muriera).
     Se deja esta función tal cual para no romper otros llamadores futuros que sí quieran la
     lista completa de una vez.
+
+    Clave de emparejamiento: (doc, tipo_doc), no doc solo — un mismo número de comprobante
+    puede repetirse legítimamente entre una Factura y su Nota de Crédito asociada (mismo
+    doc, tipo_doc distinto); doc solo no alcanza para identificar un comprobante único.
     """
-    libro_map = {r["doc"]: r for r in libro_rows}
-    rg90_map = {r["doc"]: r for r in rg90_rows}
+    libro_map = {(r["doc"], r.get("tipo_doc", "")): r for r in libro_rows}
+    rg90_map = {(r["doc"], r.get("tipo_doc", "")): r for r in rg90_rows}
     return list(reconcile_with_rg90_iter(libro_map, rg90_map))
 
 
@@ -1460,16 +1464,18 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
             }
 
 
-def reconcile_with_rg90_iter(libro_map: Dict[str, Dict[str, Any]], rg90_map: Dict[str, Dict[str, Any]]):
+def reconcile_with_rg90_iter(libro_map: Dict[Any, Dict[str, Any]], rg90_map: Dict[Any, Dict[str, Any]]):
     """Misma lógica de comparación que reconcile_with_rg90, fila por fila, como generador
-    en vez de una lista — recibe los mapas ya armados (doc -> fila) en vez de las listas.
-    Wrapper delgado sobre _comparar_par, para quien todavía tenga ambos mapas completos en
-    memoria (ya no es el caso de /api/reconcile, que desde el cruce por SQLite usa
-    reconcile_with_rg90_iter_pares en su lugar — se deja esta función para no romper otros
-    posibles llamadores que sí quieran pasar los mapas directo)."""
-    all_docs = set(libro_map.keys()).union(set(rg90_map.keys()))
-    for doc in sorted(all_docs):
-        yield _comparar_par(doc, libro_map.get(doc), rg90_map.get(doc))
+    en vez de una lista — recibe los mapas ya armados ((doc, tipo_doc) -> fila) en vez de
+    las listas. Wrapper delgado sobre _comparar_par, para quien todavía tenga ambos mapas
+    completos en memoria (ya no es el caso de /api/reconcile, que desde el cruce por
+    SQLite usa reconcile_with_rg90_iter_pares en su lugar — se deja esta función para no
+    romper otros posibles llamadores que sí quieran pasar los mapas directo).
+
+    Clave (doc, tipo_doc), no doc solo — ver el docstring de reconcile_with_rg90."""
+    all_claves = set(libro_map.keys()).union(set(rg90_map.keys()))
+    for doc, tipo_doc in sorted(all_claves):
+        yield _comparar_par(doc, libro_map.get((doc, tipo_doc)), rg90_map.get((doc, tipo_doc)))
 
 
 def reconcile_with_rg90_iter_pares(pares):
@@ -1477,7 +1483,14 @@ def reconcile_with_rg90_iter_pares(pares):
     emparejados de antemano — pensado para recibir directo el cursor de un JOIN hecho en
     SQLite (ver /api/reconcile en main.py), sin necesitar los dos mapas completos en
     memoria de Python al mismo tiempo. Es la misma lógica de negocio que
-    reconcile_with_rg90_iter, solo cambia de dónde vienen los pares ya casados."""
+    reconcile_with_rg90_iter, solo cambia de dónde vienen los pares ya casados.
+
+    `doc` acá es siempre el STRING del número de comprobante (no una tupla): el
+    emparejamiento por (doc, tipo_doc) ya se resolvió ANTES de llegar acá (en el JOIN de
+    SQL, con ON doc AND tipo_doc) — cada par que entra ya está correctamente casado por
+    ambos campos, así que alcanza con el doc para identificar la fila en el resultado
+    (tipo_doc ya viene embebido en pos_rec/rg_rec, ambos con el mismo valor por
+    construcción del join)."""
     for doc, pos_rec, rg_rec in pares:
         yield _comparar_par(doc, pos_rec, rg_rec)
 

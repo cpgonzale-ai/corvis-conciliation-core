@@ -52,18 +52,18 @@ except (OSError, AttributeError):
 
 
 def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str, lote: list) -> None:
-    """Inserta un lote de (doc, data) en `tabla` (libro o rg90 -- ver más abajo). doc es
-    PRIMARY KEY: el algoritmo de comparación (_comparar_par, engine.py, sin cambios en
-    este refactor) siempre asumió un comprobante por doc -- ya lo hacía el código
-    original con `libro_map = {r["doc"]: r for r in libro_rows}`, que ante un doc repetido
-    se quedaba silenciosamente con la última fila. Permitir duplicados en esta tabla sin
-    tocar esa invariante convertiría el join en un producto cartesiano (un doc con 3 filas
-    en libro × 2 en rg90 compararía 6 pares, no 3) -- un bug de negocio silencioso, peor
-    que fallar ruidosamente. Por eso la PK se mantiene: si el insert choca, se reintenta
-    fila por fila para identificar exactamente qué doc(s) vienen repetidos en el archivo y
-    se corta con un 422 explícito (en vez del IntegrityError de SQLite sin ningún valor
-    concreto), para poder confirmar con el archivo real si es un problema de formato
-    (detalle por ítem en vez de resumen por comprobante) o un dato sucio puntual.
+    """Inserta un lote de (doc, tipo_doc, data) en `tabla` (libro o rg90 -- ver más abajo).
+    (doc, tipo_doc) es PRIMARY KEY compuesta: el algoritmo de comparación (_comparar_par,
+    engine.py) identifica un comprobante único por esa combinación, no por doc solo — un
+    mismo número de comprobante puede repetirse legítimamente entre una Factura y su Nota
+    de Crédito asociada (confirmado con un archivo real). Con clave (doc, tipo_doc), un
+    duplicado real dentro de la misma tabla significa que el archivo trae más de una fila
+    para el MISMO comprobante Y el mismo tipo (ej. líneas de detalle por ítem/tasa de IVA
+    de una misma factura) — eso sí rompería la invariante 1:1 que asume _comparar_par
+    (permitirlo sin tocar el join lo convertiría en un producto cartesiano, un bug de
+    negocio silencioso, peor que fallar ruidosamente). Si el insert choca, se identifica
+    exactamente qué comprobante(s) vienen repetidos y se corta con un 422 explícito (en
+    vez del IntegrityError de SQLite, que no expone ningún valor concreto).
 
     No usa ROLLBACK ni SAVEPOINT para deshacer el lote fallido a propósito: con
     journal_mode=OFF (ver más abajo, en la conexión) SQLite deja de poder revertir nada —
@@ -75,44 +75,50 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
     filas insertadas de un lote que terminó fallando no tiene ningún efecto persistente.
     """
     try:
-        con.executemany(f"INSERT INTO {tabla} (doc, data) VALUES (?, ?)", lote)
+        con.executemany(f"INSERT INTO {tabla} (doc, tipo_doc, data) VALUES (?, ?, ?)", lote)
     except sqlite3.IntegrityError:
-        # Se cuenta cada doc dentro de ESTE lote (Python puro, sin tocar la tabla) -- para
-        # el caso común (líneas de un mismo comprobante seguidas en el archivo, cayendo en
-        # el mismo lote de INSERT_BATCH) esto ya da el conteo exacto de apariciones. El
-        # caso menos común -- un doc repetido pero separado entre dos lotes distintos, que
-        # acá se ve como "aparece 1 sola vez en este lote" -- se detecta aparte: si ese doc
-        # ya existía en la tabla (insertado por un lote anterior), también se reporta,
-        # sin conteo exacto (no vale la pena la complejidad extra por un caso raro).
+        # Se cuenta cada (doc, tipo_doc) dentro de ESTE lote (Python puro, sin tocar la
+        # tabla) -- para el caso común (líneas de un mismo comprobante seguidas en el
+        # archivo, cayendo en el mismo lote de INSERT_BATCH) esto ya da el conteo exacto
+        # de apariciones. El caso menos común -- una clave repetida pero separada entre
+        # dos lotes distintos, que acá se ve como "aparece 1 sola vez en este lote" -- se
+        # detecta aparte: si esa clave ya existía en la tabla (insertada por un lote
+        # anterior), también se reporta, sin conteo exacto (no vale la pena la complejidad
+        # extra por un caso raro).
         vistos: dict = {}
-        for doc, _ in lote:
-            vistos[doc] = vistos.get(doc, 0) + 1
-        conteos = {doc: n for doc, n in vistos.items() if n > 1}
-        docs_solo_una_vez_en_lote = [doc for doc, n in vistos.items() if n == 1]
-        if docs_solo_una_vez_en_lote:
-            placeholders = ",".join("?" * len(docs_solo_una_vez_en_lote))
+        for doc, tipo_doc, _ in lote:
+            clave = (doc, tipo_doc)
+            vistos[clave] = vistos.get(clave, 0) + 1
+        conteos = {clave: n for clave, n in vistos.items() if n > 1}
+        claves_solo_una_vez_en_lote = [clave for clave, n in vistos.items() if n == 1]
+        if claves_solo_una_vez_en_lote:
+            condiciones = " OR ".join(["(doc = ? AND tipo_doc = ?)"] * len(claves_solo_una_vez_en_lote))
+            params = [v for clave in claves_solo_una_vez_en_lote for v in clave]
             ya_en_lote_anterior = con.execute(
-                f"SELECT doc FROM {tabla} WHERE doc IN ({placeholders})",
-                docs_solo_una_vez_en_lote,
+                f"SELECT doc, tipo_doc FROM {tabla} WHERE {condiciones}", params,
             ).fetchall()
-            for (doc,) in ya_en_lote_anterior:
-                conteos[doc] = "más de una vez, en bloques distintos del archivo"
+            for doc, tipo_doc in ya_en_lote_anterior:
+                conteos[(doc, tipo_doc)] = "más de una vez, en bloques distintos del archivo"
         if not conteos:
             raise
         # conteos mezcla int (conteo exacto, duplicado dentro del mismo lote) con str
         # (duplicado entre lotes distintos, sin conteo exacto) -- se ordena poniendo los
         # conteos exactos más altos primero, dejando los aproximados al final.
         items = sorted(conteos.items(), key=lambda kv: kv[1] if isinstance(kv[1], int) else -1, reverse=True)
-        ejemplos = ", ".join(f"'{doc}' ({n} veces)" if isinstance(n, int) else f"'{doc}' ({n})" for doc, n in items[:5])
+        ejemplos = ", ".join(
+            f"'{doc}' ({tipo_doc}) ({n} veces)" if isinstance(n, int) else f"'{doc}' ({tipo_doc}) ({n})"
+            for (doc, tipo_doc), n in items[:5]
+        )
         resto = f" y {len(items) - 5} comprobante(s) más" if len(items) > 5 else ""
         raise HTTPException(
             status_code=422,
             detail=(
                 f"El archivo tiene comprobantes repetidos en \"{tabla}\": {ejemplos}{resto}. "
-                "La comparación contra la RG90 espera una fila por comprobante, con los montos "
-                "ya totalizados (así es como el RG90/SET los reporta) — si el archivo trae una "
-                "fila por ítem/línea de detalle (ej. distintas tasas de IVA de una misma "
-                "factura), hay que sumarlas en un único total por comprobante antes de subirlo."
+                "La comparación contra la RG90 espera una fila por comprobante y tipo (Factura o "
+                "Nota de Crédito), con los montos ya totalizados (así es como el RG90/SET los "
+                "reporta) — si el archivo trae una fila por ítem/línea de detalle (ej. distintas "
+                "tasas de IVA de una misma factura), hay que sumarlas en un único total por "
+                "comprobante antes de subirlo."
             ),
         )
 
@@ -374,10 +380,13 @@ async def reconcile(
     # sí hace falta en una base persistente de verdad.
     con.execute("PRAGMA journal_mode=OFF")
     con.execute("PRAGMA synchronous=OFF")
-    # "doc TEXT PRIMARY KEY" ya crea el índice único sobre esa columna -- no hace falta un
+    # Clave (doc, tipo_doc), no doc solo: un mismo número de comprobante puede repetirse
+    # legítimamente entre una Factura y su Nota de Crédito asociada (confirmado con un
+    # archivo real) -- doc solo no identifica un comprobante único. PRIMARY KEY (doc,
+    # tipo_doc) ya crea el índice compuesto necesario para el JOIN -- no hace falta un
     # CREATE INDEX aparte, sería redundante.
-    con.execute("CREATE TABLE libro (doc TEXT PRIMARY KEY, data TEXT NOT NULL)")
-    con.execute("CREATE TABLE rg90 (doc TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    con.execute("CREATE TABLE libro (doc TEXT NOT NULL, tipo_doc TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (doc, tipo_doc))")
+    con.execute("CREATE TABLE rg90 (doc TEXT NOT NULL, tipo_doc TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (doc, tipo_doc))")
 
     try:
         try:
@@ -393,7 +402,7 @@ async def reconcile(
             # en vez de float como hacía json.loads() -- sin esto, _monto_diff() revienta
             # con TypeError al restar un Decimal (de acá) contra un float (del lado RG90).
             for row in ijson.items(pos_data_file.file, "item", use_float=True):
-                lote_insert.append((row["doc"], json.dumps(row)))
+                lote_insert.append((row["doc"], row.get("tipo_doc", ""), json.dumps(row)))
                 cantidad_comprobantes += 1
                 if len(lote_insert) >= INSERT_BATCH:
                     _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert)
@@ -432,7 +441,7 @@ async def reconcile(
             # campos de montos que no usa.
             gaps_input = []
             for i, chunk in enumerate(engine.ingest_file_streaming(tmp_path, "rg90_set", "RG90 SET"), start=1):
-                _insertar_lote_diagnosticando_duplicados(con, "rg90", [(r["doc"], json.dumps(r)) for r in chunk])
+                _insertar_lote_diagnosticando_duplicados(con, "rg90", [(r["doc"], r.get("tipo_doc", ""), json.dumps(r)) for r in chunk])
                 gaps_input.extend({"doc": r["doc"], "tipo_doc": r["tipo_doc"], "local": r["local"], "sistema": r["sistema"]} for r in chunk)
                 total += len(chunk)
                 # gc.collect() + malloc_trim() cada 10 bloques: la subida de RSS medida acá
@@ -534,29 +543,34 @@ async def reconcile(
             _push(json.dumps(rg90_gaps))
             _push(', "diffs": [')
 
-            # EL CRUCE: FULL OUTER JOIN por "doc", simulado con LEFT JOIN + UNION ALL
-            # porque esta instancia de SQLite (3.37) es anterior a la 3.39, que agregó
-            # soporte nativo para FULL OUTER JOIN. UNION ALL (no UNION) porque "doc" ya es
-            # PRIMARY KEY en ambas tablas -- no hay riesgo de duplicados, y evita el costo
+            # EL CRUCE: FULL OUTER JOIN por (doc, tipo_doc) -- no doc solo, ver el
+            # docstring de _insertar_lote_diagnosticando_duplicados: un mismo número de
+            # comprobante puede repetirse legítimamente entre una Factura y su Nota de
+            # Crédito asociada. Simulado con LEFT JOIN + UNION ALL porque esta instancia
+            # de SQLite (3.37) es anterior a la 3.39, que agregó soporte nativo para FULL
+            # OUTER JOIN. UNION ALL (no UNION) porque (doc, tipo_doc) ya es PRIMARY KEY
+            # compuesta en ambas tablas -- no hay riesgo de duplicados, y evita el costo
             # extra de deduplicar que haría un UNION simple. SQLite solo empareja filas acá
             # adentro: la comparación de montos/estados sigue pasando en Python, fila por
             # fila, más abajo (_comparar_par en engine.py) -- nada de lógica de negocio se
             # movió a SQL.
             cursor_join = con.execute("""
-                SELECT l.doc, l.data, r.data
-                FROM libro l LEFT JOIN rg90 r ON l.doc = r.doc
+                SELECT l.doc, l.tipo_doc, l.data, r.data
+                FROM libro l LEFT JOIN rg90 r ON l.doc = r.doc AND l.tipo_doc = r.tipo_doc
                 UNION ALL
-                SELECT r.doc, NULL, r.data
-                FROM rg90 r LEFT JOIN libro l ON l.doc = r.doc
+                SELECT r.doc, r.tipo_doc, NULL, r.data
+                FROM rg90 r LEFT JOIN libro l ON l.doc = r.doc AND l.tipo_doc = r.tipo_doc
                 WHERE l.doc IS NULL
-                ORDER BY 1
-            """)  # ORDER BY 1 (posición, no nombre): SQLite no siempre resuelve el nombre
-            # de columna de un UNION ALL de forma confiable ("1st ORDER BY term does not
-            # match any column in the result set" con ORDER BY doc) -- por posición
-            # funciona siempre.
+                ORDER BY 1, 2
+            """)  # ORDER BY 1, 2 (posición, no nombre): SQLite no siempre resuelve el
+            # nombre de columna de un UNION ALL de forma confiable ("1st ORDER BY term
+            # does not match any column in the result set" con ORDER BY doc) -- por
+            # posición funciona siempre. Por ambas columnas (doc, tipo_doc) para que el
+            # orden entre, por ejemplo, la Factura y la Nota de Crédito de un mismo doc
+            # sea determinístico.
 
             def _pares_desde_sqlite():
-                for doc, libro_json, rg90_json in cursor_join:
+                for doc, _tipo_doc, libro_json, rg90_json in cursor_join:
                     pos_rec = json.loads(libro_json) if libro_json is not None else None
                     rg_rec = json.loads(rg90_json) if rg90_json is not None else None
                     yield doc, pos_rec, rg_rec
