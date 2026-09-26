@@ -31,16 +31,6 @@ async def guardar_archivo_seguro(upload_file: UploadFile, tmp_dir: str) -> str:
             ),
         )
 
-    contenido = await upload_file.read()
-    if len(contenido) > TAMANO_MAXIMO_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"El archivo '{upload_file.filename}' supera el tamaño máximo permitido "
-                f"({TAMANO_MAXIMO_BYTES // (1024 * 1024)} MB)."
-            ),
-        )
-
     tmp_dir_resuelto = Path(tmp_dir).resolve()
     destino = (tmp_dir_resuelto / f"{uuid.uuid4().hex}{ext}").resolve()
     # El nombre es un uuid generado acá, así que esto no debería poder fallar nunca — se
@@ -48,5 +38,23 @@ async def guardar_archivo_seguro(upload_file: UploadFile, tmp_dir: str) -> str:
     if destino.parent != tmp_dir_resuelto:
         raise HTTPException(status_code=500, detail="Ruta de archivo temporal inválida.")
 
-    destino.write_bytes(contenido)
+    # Streaming real a disco en fragmentos de 1MB, cortando apenas se supera el límite —
+    # antes se leía el archivo COMPLETO a RAM (upload_file.read()) para recién ahí medir el
+    # tamaño, así que el chequeo de tamaño llegaba tarde: ya se había gastado la RAM antes
+    # de poder rechazarlo (ver auditoria de infraestructura).
+    total = 0
+    with open(destino, "wb") as f:
+        while chunk := await upload_file.read(1024 * 1024):
+            total += len(chunk)
+            if total > TAMANO_MAXIMO_BYTES:
+                f.close()
+                destino.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"El archivo '{upload_file.filename}' supera el tamaño máximo permitido "
+                        f"({TAMANO_MAXIMO_BYTES // (1024 * 1024)} MB)."
+                    ),
+                )
+            f.write(chunk)
     return str(destino)
