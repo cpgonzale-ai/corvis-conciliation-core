@@ -30,6 +30,7 @@ from app.core.audit import log_evento as _log_evento
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90_iter_pares
+from app.core.middleware import GzipRequestDecompressionMiddleware
 from app.core.uploads import guardar_archivo_seguro
 from app.db.database import get_db
 from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Usuario
@@ -177,6 +178,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Descomprime pedidos con Content-Encoding: gzip antes de que lleguen a cualquier endpoint
+# -- ver el porqué en app/core/middleware.py. allow_headers=["*"] de arriba ya deja pasar
+# Content-Encoding sin nada extra que configurar del lado de CORS.
+app.add_middleware(GzipRequestDecompressionMiddleware)
 
 app.include_router(auth_router)
 app.include_router(compras_router)
