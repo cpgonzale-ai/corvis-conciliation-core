@@ -435,6 +435,23 @@ def _repair_embedded_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalizar_encabezado(s: Any) -> str:
+    """Recorta espacios al inicio/final y colapsa espacios internos repetidos a uno solo,
+    para comparar el nombre de columna esperado por el perfil (source_name) contra el
+    encabezado real del archivo sin que un espacio de más/de menos rompa el match.
+
+    Bug real encontrado (RG90 SET — Ventas, columna "Monto No Gravado / Exento "): el
+    perfil declara esa columna con un espacio final, pero _usecols_para_perfil (ver su
+    docstring) ya la incluía en la lectura de forma tolerante a espacios — el archivo SÍ
+    traía la columna, solo que con una cantidad de espacios distinta a la del perfil. El
+    problema real estaba un paso más adelante: la extracción del valor de esa columna
+    (_process_dataframe / el generador streaming) seguía comparando por igualdad exacta de
+    string, así que la columna quedaba en None para todas las filas sin ningún error — y
+    con "exenta" en None, el fallback de más abajo (gravada = total / 1.1) tomaba un
+    comprobante 100% exento y lo recalculaba como si fuera 100% gravado al 10%."""
+    return re.sub(r"\s+", " ", str(s).strip())
+
+
 def _nombres_columnas_perfil(profile: Dict) -> Optional[set]:
     """Nombres de columna que el perfil realmente mapea (source_name), o None si el perfil
     mezcla mapeo por posición (source_col, ej. Aloha/Hiopos) — ahí no se puede saber de
@@ -607,10 +624,21 @@ class IngestionEngine:
         # fuera ventas, o viceversa) sin que salte ningún error. Perfiles con esta bandera
         # exigen la hoja exacta: si no aparece, se corta acá, no se prueba ninguna otra.
         if profile.get("require_exact_sheet_name") and not candidatos:
-            raise ValueError(
-                f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
-                f"verificá que sea el Formato Universal correcto para {profile['name']}."
-            )
+            if len(sheet_names) == 1:
+                # Una sola hoja en TODO el archivo: no existe la ambigüedad Ventas/Compras
+                # que require_exact_sheet_name existe para evitar (no hay ninguna otra hoja
+                # con la que se pueda confundir). Si ya pasó _matches_profile_signature más
+                # arriba (las columnas esperadas están ahí), es la hoja correcta aunque el
+                # cliente la haya dejado con el nombre por defecto de Excel ("Hoja1",
+                # "Sheet1", etc.) en vez de renombrarla — caso real: "Libro ventas Local
+                # Adminstracion LV.xlsx", encabezado idéntico al Formato Universal, hoja
+                # llamada "Hoja1".
+                candidatos = [0]
+            else:
+                raise ValueError(
+                    f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
+                    f"verificá que sea el Formato Universal correcto para {profile['name']}."
+                )
         if profile.get("require_exact_sheet_name"):
             candidatos = candidatos[:1]
         else:
@@ -781,10 +809,15 @@ class IngestionEngine:
                     candidatos.append(i)
                     break
         if profile.get("require_exact_sheet_name") and not candidatos:
-            raise ValueError(
-                f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
-                f"verificá que sea el archivo correcto para {profile['name']}."
-            )
+            # Ver el mismo caso en ingest_file (no-streaming) más arriba: una sola hoja en
+            # todo el archivo no tiene con qué confundirse, aunque no tenga el nombre exacto.
+            if len(sheet_names) == 1:
+                candidatos = [0]
+            else:
+                raise ValueError(
+                    f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
+                    f"verificá que sea el archivo correcto para {profile['name']}."
+                )
         if profile.get("require_exact_sheet_name"):
             candidatos = candidatos[:1]
         else:
@@ -818,10 +851,21 @@ class IngestionEngine:
             produjo_alguna = False
             for chunk_dicts in self._leer_hoja_en_bloques(file_path, ext, idx, hdr_idx, usecols, chunk_size):
                 extracted_cols = {}
+                # Mismo criterio tolerante a espacios que _process_dataframe (ver
+                # _normalizar_encabezado) — acá las filas son dicts (chunk_dicts), así que se
+                # resuelve una única vez por chunk, a partir de las claves de la primera fila,
+                # en vez de re-normalizar en cada fila.
+                claves_por_encabezado_norm = (
+                    {_normalizar_encabezado(k): k for k in chunk_dicts[0].keys()} if chunk_dicts else {}
+                )
                 for col_spec in mappings:
                     target = col_spec["target_field"]
                     c_name = col_spec.get("source_name")
-                    extracted_cols[target] = [row.get(c_name) for row in chunk_dicts]
+                    if chunk_dicts and c_name in chunk_dicts[0]:
+                        c_real = c_name
+                    else:
+                        c_real = claves_por_encabezado_norm.get(_normalizar_encabezado(c_name))
+                    extracted_cols[target] = [row.get(c_real) for row in chunk_dicts] if c_real is not None else [None] * len(chunk_dicts)
                 records_df_chunk = pd.DataFrame(extracted_cols)
                 if len(records_df_chunk) == 0:
                     continue
@@ -840,6 +884,11 @@ class IngestionEngine:
     def _process_dataframe(self, df: pd.DataFrame, profile: Dict, local_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         mappings = profile.get("column_mappings", [])
         extracted_cols = {}
+        # Mapa encabezado-normalizado -> encabezado real, para resolver un source_name del
+        # perfil aunque el archivo tenga una cantidad distinta de espacios (ver
+        # _normalizar_encabezado) — antes de este mapa, una columna así quedaba en None para
+        # TODAS las filas sin ningún error, indistinguible de una columna vacía.
+        columnas_por_encabezado_norm = {_normalizar_encabezado(c): c for c in df.columns}
 
         for col_spec in mappings:
             target = col_spec["target_field"]
@@ -848,7 +897,11 @@ class IngestionEngine:
                 extracted_cols[target] = df.iloc[:, c_idx] if c_idx < len(df.columns) else pd.Series([None] * len(df))
             else:
                 c_name = col_spec.get("source_name")
-                extracted_cols[target] = df[c_name] if c_name in df.columns else pd.Series([None] * len(df))
+                if c_name in df.columns:
+                    c_real = c_name
+                else:
+                    c_real = columnas_por_encabezado_norm.get(_normalizar_encabezado(c_name))
+                extracted_cols[target] = df[c_real] if c_real is not None else pd.Series([None] * len(df))
 
         records_df = pd.DataFrame(extracted_cols)
         usa_clasificacion_tasa = "gravada_bruta" in records_df.columns

@@ -50,6 +50,29 @@ from app.core.engine import (
 # comparación.
 _MARCADORES_NC = ("NC", "NCE", "NOTA DE CRÉDITO", "NOTA DE CREDITO", "NOTA DE CRÉDITO ELECTRONICA", "NOTA DE CREDITO ELECTRONICA")
 
+# Códigos abreviados que algunos sistemas de origen usan en la columna "Tipo" en vez del
+# nombre completo del SET (confirmado por el cliente sobre un archivo real de Formato
+# Universal de Compras, ver "LC Formato universal 07-2026.xlsx"). Se resuelven al nombre
+# oficial ANTES del filtro por tipo_comprobante_permitidos (ese filtro compara contra los
+# nombres completos declarados en el perfil, ej. compras_universal.json) — sin esto, un
+# archivo que usa códigos en vez de nombres largos queda con el 100% de sus filas
+# descartadas en silencio, aunque el resto del comprobante sea válido. Cualquier código no
+# listado acá sigue sin reconocerse y su fila se descarta como corresponde a un tipo no
+# permitido.
+_ABREVIATURAS_TIPO_COMPROBANTE = {
+    "FA": "FACTURA",
+    "FE": "FACTURA ELECTRONICA",
+    "FV": "FACTURA VIRTUAL",
+    "NC": "NOTA DE CRÉDITO",
+    "NCE": "NOTA DE CRÉDITO ELECTRONICA",
+    "ND": "NOTA DE DÉBITO",
+    "NDE": "NOTA DE DÉBITO ELECTRONICA",
+    "DE": "DESPACHO DE IMPORTACIÓN",
+}
+_ABREVIATURAS_TIPO_COMPROBANTE_NORM = {
+    _normalizar_tipo(k): v for k, v in _ABREVIATURAS_TIPO_COMPROBANTE.items()
+}
+
 
 def _split_ruc_dv(raw: Any) -> Tuple[str, str]:
     """Separa '80016096-7' -> ('80016096', '7'). Si no trae guion (ej. la RG, que ya informa
@@ -129,10 +152,21 @@ class ComprasEngine:
             if prefer_name:
                 encontrada = next((i for i, name in enumerate(sheet_names) if str(name).strip().lower() == prefer_name), None)
                 if encontrada is None:
-                    raise ValueError(
-                        f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
-                        f"verificá que sea el archivo correcto para {profile['name']}."
-                    )
+                    # Una sola hoja en TODO el archivo: no hay ninguna otra con la que
+                    # confundirse (la razón de exigir el nombre exacto es evitar leer una
+                    # hoja de Ventas como si fuera de Compras cuando ambas conviven en el
+                    # mismo archivo con columnas idénticas). Si ya pasó
+                    # _matches_profile_signature más arriba, es la hoja correcta aunque el
+                    # cliente la haya dejado con el nombre por defecto de Excel ("Hoja1",
+                    # "Sheet1", etc.) — mismo criterio que en engine.py (ingest_file de
+                    # Ventas).
+                    if len(sheet_names) == 1:
+                        encontrada = 0
+                    else:
+                        raise ValueError(
+                            f"El archivo no tiene una hoja llamada \"{profile.get('prefer_sheet_name')}\" — "
+                            f"verificá que sea el archivo correcto para {profile['name']}."
+                        )
                 sheet_index = encontrada
 
             df = pd.read_excel(file_path, header=hdr_idx, sheet_name=sheet_index, usecols=usecols, engine="calamine")
@@ -187,6 +221,9 @@ class ComprasEngine:
         rows: List[Dict[str, Any]] = []
         for idx in range(n):
             tipo_comprobante = fix_mojibake(str(tipo_comprobante_l[idx] or "").strip())
+            tipo_comprobante = _ABREVIATURAS_TIPO_COMPROBANTE_NORM.get(
+                _normalizar_tipo(tipo_comprobante), tipo_comprobante
+            )
 
             # Filtro explícito por tipo de comprobante, declarado por perfil: la RG de
             # compras admite todos los tipos de comprobante que el SET reconoce para el
