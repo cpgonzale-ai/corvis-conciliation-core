@@ -93,11 +93,27 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
         conteos = {clave: n for clave, n in vistos.items() if n > 1}
         claves_solo_una_vez_en_lote = [clave for clave, n in vistos.items() if n == 1]
         if claves_solo_una_vez_en_lote:
-            condiciones = " OR ".join(["(doc = ? AND tipo_doc = ?)"] * len(claves_solo_una_vez_en_lote))
-            params = [v for clave in claves_solo_una_vez_en_lote for v in clave]
+            # Bug real encontrado con un archivo de menos de 10.000 filas: antes acá se
+            # armaba un WHERE con un "OR (doc = ? AND tipo_doc = ?)" por cada clave
+            # candidata -- con INSERT_BATCH=5000, un lote sin duplicados internos pero que
+            # sí choca contra un lote anterior podía encadenar miles de OR en una sola
+            # consulta, superando el límite de profundidad de expresión de SQLite (1000):
+            # "OperationalError: Expression tree is too large (maximum depth 1000)". La
+            # consulta de diagnóstico (un caso ya de por sí infrecuente) terminaba
+            # crasheando con un 500 genérico en vez de devolver el 422 explícito que esta
+            # función existe para dar.
+            #
+            # Se reemplaza por una tabla temporal + JOIN, mismo patrón que ya usa este
+            # endpoint para el cruce principal (libro/rg90) -- sin ninguna cadena de OR, el
+            # tamaño de la consulta no depende de cuántas claves se estén diagnosticando.
+            con.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_claves_diag (doc TEXT, tipo_doc TEXT)")
+            con.execute("DELETE FROM tmp_claves_diag")
+            con.executemany("INSERT INTO tmp_claves_diag (doc, tipo_doc) VALUES (?, ?)", claves_solo_una_vez_en_lote)
             ya_en_lote_anterior = con.execute(
-                f"SELECT doc, tipo_doc FROM {tabla} WHERE {condiciones}", params,
+                f"SELECT t.doc, t.tipo_doc FROM {tabla} t "
+                f"JOIN tmp_claves_diag c ON t.doc = c.doc AND t.tipo_doc = c.tipo_doc"
             ).fetchall()
+            con.execute("DROP TABLE tmp_claves_diag")
             for doc, tipo_doc in ya_en_lote_anterior:
                 conteos[(doc, tipo_doc)] = "más de una vez, en bloques distintos del archivo"
         if not conteos:
