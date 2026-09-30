@@ -329,7 +329,7 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                 "local": rg_rec.get("local", "Desconocido"),
                 "libro": _lado_diff(None),
                 "rg": _lado_diff(rg_rec),
-                "diferencia": "No en libro propio",
+                "diferencia": "No existe en el libro",
             })
         elif pos_rec and rg_rec:
             campo_diffs = {

@@ -1474,7 +1474,7 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
             "local": rg_rec.get("local", "Desconocido"),
             "libro": _lado_diff_ventas(None),
             "rg90": _lado_diff_ventas(rg_rec),
-            "diferencia": "No en libro propio"
+            "diferencia": "No existe en el libro"
         }
     else:
         # Bug real corregido acá: el comentario original de esta función afirmaba que "la

@@ -143,7 +143,7 @@ async def reconcile_compras(
     rg_gaps = detect_sequence_gaps(rg_rows)
 
     no_en_rg = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
-    no_en_libro = len([d for d in diffs if d["diferencia"] == "No en libro propio"])
+    no_en_libro = len([d for d in diffs if d["diferencia"] == "No existe en el libro"])
     diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
     # Ahora que reconcile_compras_with_rg informa "Coincide" como categoría real (antes no
     # guardaba nada para esos comprobantes), se cuenta directo en vez de por resta.

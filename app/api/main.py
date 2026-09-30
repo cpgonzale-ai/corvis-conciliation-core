@@ -216,7 +216,7 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
 _CATEGORIA_A_CONTADOR_RECONCILE = {
     "Coincide": "coinciden",
     "No llegó a la interfaz": "no_en_rg90",
-    "No en libro propio": "no_en_libro",
+    "No existe en el libro": "no_en_libro",
     "Salto de numeración": "saltos",
     "Anulada": "anuladas",
     "Diferencia de monto": "diferencia_monto",
