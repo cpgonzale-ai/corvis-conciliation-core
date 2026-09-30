@@ -23,6 +23,10 @@ from app.db.models import ArchivoProcesado, LoteProcesamiento, ResultadoRG90, Us
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "profiles")
 engine = ComprasEngine(PROFILES_DIR)
 
+# Mismo mensaje/criterio que MSG_ARCHIVO_NO_VALIDO en app/api/main.py (no se importa desde
+# ahí para no crear un import circular -- main.py ya importa este router).
+MSG_ARCHIVO_NO_VALIDO = "El archivo subido no es un Excel válido o está corrupto."
+
 # Ver la misma constante en app/api/main.py: Starlette limita a 1MB cada "parte" de un
 # multipart/form-data por defecto (también los campos de texto, no solo los archivos), y
 # pos_data_json puede superar eso ampliamente con libros de miles de comprobantes.
@@ -63,6 +67,18 @@ async def ingest_compras(
                             f"Sistema: {e_sistema} | Universal: {e_universal}"
                         ),
                     )
+                except Exception:
+                    # El archivo ni siquiera se pudo ABRIR como Excel (PDF renombrado,
+                    # archivo corrupto, etc.) -- mismo caso que en /api/ingest (ventas, ver
+                    # main.py): python_calamine.CalamineError no es ValueError, así que sin
+                    # este except se escapaba hasta un 500 genérico (o, peor, tumbaba la
+                    # conexión sin respuesta HTTP válida) en vez del 422 explícito que el
+                    # frontend ya sabe mostrar.
+                    raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
+            except Exception:
+                # Mismo caso que arriba, para cuando falla ya el primer intento
+                # (compras_sistema) y ni siquiera llega a intentar compras_universal.
+                raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
             all_rows.extend(rows)
 
     lote = LoteProcesamiento(
