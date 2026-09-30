@@ -1477,15 +1477,24 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
             "diferencia": "No en libro propio"
         }
     else:
-        # La RG90 siempre informa en valor absoluto (confirmado: tanto el reporte de
-        # venta como el de NC del SET traen montos positivos), mientras que el libro
-        # propio ahora guarda las notas de crédito en negativo (para que "Total Neto" dé
-        # la venta neta real). El control contra la RG90 compara magnitudes, no signo.
+        # Bug real corregido acá: el comentario original de esta función afirmaba que "la
+        # RG90 siempre informa en valor absoluto", así que solo se envolvía en abs() el lado
+        # del libro. Eso es FALSO para la RG90 SET real: el perfil rg90_set.json declara
+        # "tipo_documento_notas_credito", y _process_dataframe_vectorizado aplica el MISMO
+        # signo negativo a una Nota de Crédito sin importar si viene del libro propio o de la
+        # RG90 (confirmado con un archivo real: una NC en la RG90 llega acá con
+        # total_num=-100500.00, no +100500.00). Sin abs() de este lado, un comprobante que
+        # coincide EXACTO entre libro y RG90 (ambos -100.500,00) se comparaba como
+        # abs(-100500) - (-100500) = 100500 - (-100500) = 201.000 -- una "diferencia" falsa
+        # igual a la SUMA de ambos montos, no a su diferencia real (0) -- y quedaba mal
+        # clasificado como "Diferencia de monto" en vez de "Coincide". Mismo criterio que ya
+        # usa correctamente compras_engine.py, que envuelve los dos lados en abs(). El
+        # control contra la RG90 compara magnitudes, no signo.
         campo_diffs = {
-            "total": _monto_diff(abs(pos_rec["total_num"]), rg_rec["total_num"]),
-            "iva_10": _monto_diff(abs(pos_rec.get("iva_num", 0.0)), rg_rec.get("iva_num", 0.0)),
-            "iva_5": _monto_diff(abs(pos_rec.get("iva_5_num", 0.0)), rg_rec.get("iva_5_num", 0.0)),
-            "exenta": _monto_diff(abs(pos_rec.get("exentas_num", 0.0)), rg_rec.get("exentas_num", 0.0)),
+            "total": _monto_diff(abs(pos_rec["total_num"]), abs(rg_rec["total_num"])),
+            "iva_10": _monto_diff(abs(pos_rec.get("iva_num", 0.0)), abs(rg_rec.get("iva_num", 0.0))),
+            "iva_5": _monto_diff(abs(pos_rec.get("iva_5_num", 0.0)), abs(rg_rec.get("iva_5_num", 0.0))),
+            "exenta": _monto_diff(abs(pos_rec.get("exentas_num", 0.0)), abs(rg_rec.get("exentas_num", 0.0))),
         }
         campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
 

@@ -165,6 +165,16 @@ def _valor_celda(d: RG90DiffRowIn, lado: str, campo: str) -> str:
 
 
 def _diferencia_campo(d: RG90DiffRowIn, campo: str) -> str:
+    # Bug real corregido acá (mismo fix que diferenciaCampoVentas en el frontend, ver
+    # utils/diffVentasColumns.ts): para una Nota de Crédito, el libro guarda el monto en
+    # NEGATIVO mientras que la RG90 siempre lo informa en positivo -- restar los valores
+    # CRUDOS (con signo) daba un número muy distinto al real (un caso de diferencia=500 se
+    # exportaba como -200.500,00). Se usa directamente el valor que el backend ya calculó
+    # correctamente al comparar (guardado en diferencias_detalle), en vez de recalcularlo acá
+    # con una resta que no contempla el signo de las NC.
+    detalle = d.diferencias_detalle or {}
+    if d.diferencia == "Diferencia de monto" and campo in detalle:
+        return _format_gs(detalle[campo])
     return _format_gs(_parse_gs(_valor_celda(d, "libro", campo)) - _parse_gs(_valor_celda(d, "rg90", campo)))
 
 
