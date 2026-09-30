@@ -75,6 +75,20 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
     abajo, y esta base SQLite temporal se borra completa en el finally del caller — dejar
     filas insertadas de un lote que terminó fallando no tiene ningún efecto persistente.
     """
+    # Bug real encontrado y corregido acá: cuando executemany falla a mitad de camino por una
+    # clave repetida, las filas ANTERIORES a la que falló (dentro de ESTE MISMO lote) quedan
+    # insertadas en la tabla igual -- confirmado con un test aislado (sqlite3 estándar, sin
+    # nada particular de este código: executemany no es atómico fila por fila, un
+    # IntegrityError a mitad de una tanda no revierte las que ya se habían insertado antes de
+    # esa fila). Sin este rowid_antes, el diagnóstico de "clave repetida entre lotes
+    # distintos" (más abajo) confundía esas filas recién insertadas por ESTE lote con
+    # duplicados genuinos de un lote ANTERIOR -- con un archivo de 100.000 filas y un solo
+    # duplicado real cerca del final de un lote, esto podía reportar miles de comprobantes
+    # como "repetidos" sin estarlo. rowid refleja el orden real de inserción (esta tabla solo
+    # inserta, nunca borra ni hace VACUUM antes de leerse) -- todo lo insertado ANTES de
+    # intentar este lote tiene rowid <= rowid_antes; lo que haya quedado insertado por el
+    # propio lote fallido, no.
+    rowid_antes = con.execute(f"SELECT COALESCE(MAX(rowid), 0) FROM {tabla}").fetchone()[0]
     try:
         con.executemany(f"INSERT INTO {tabla} (doc, tipo_doc, data) VALUES (?, ?, ?)", lote)
     except sqlite3.IntegrityError:
@@ -109,9 +123,15 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
             con.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_claves_diag (doc TEXT, tipo_doc TEXT)")
             con.execute("DELETE FROM tmp_claves_diag")
             con.executemany("INSERT INTO tmp_claves_diag (doc, tipo_doc) VALUES (?, ?)", claves_solo_una_vez_en_lote)
+            # WHERE t.rowid <= rowid_antes: solo cuenta como "ya existía" lo que estaba en la
+            # tabla ANTES de intentar este lote (un lote genuinamente anterior) -- lo que el
+            # propio lote fallido llegó a insertar antes de chocar (rowid > rowid_antes) no
+            # cuenta, es la fila real (única) de este mismo archivo, no un duplicado.
             ya_en_lote_anterior = con.execute(
                 f"SELECT t.doc, t.tipo_doc FROM {tabla} t "
-                f"JOIN tmp_claves_diag c ON t.doc = c.doc AND t.tipo_doc = c.tipo_doc"
+                f"JOIN tmp_claves_diag c ON t.doc = c.doc AND t.tipo_doc = c.tipo_doc "
+                f"WHERE t.rowid <= ?",
+                (rowid_antes,),
             ).fetchall()
             con.execute("DROP TABLE tmp_claves_diag")
             for doc, tipo_doc in ya_en_lote_anterior:
