@@ -120,23 +120,42 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
             raise
         # conteos mezcla int (conteo exacto, duplicado dentro del mismo lote) con str
         # (duplicado entre lotes distintos, sin conteo exacto) -- se ordena poniendo los
-        # conteos exactos más altos primero, dejando los aproximados al final.
+        # conteos exactos más altos primero, dejando los aproximados al final. Mismo cálculo
+        # de siempre, sin tocar nada de esto -- lo único que cambia más abajo es CÓMO se arma
+        # el detail de la excepción (estructurado en vez de un párrafo armado a mano con
+        # solo 5 ejemplos), para que el frontend lo muestre en una grilla ordenada y con
+        # el listado COMPLETO, no truncado.
         items = sorted(conteos.items(), key=lambda kv: kv[1] if isinstance(kv[1], int) else -1, reverse=True)
-        ejemplos = ", ".join(
-            f"'{doc}' ({tipo_doc}) ({n} veces)" if isinstance(n, int) else f"'{doc}' ({tipo_doc}) ({n})"
-            for (doc, tipo_doc), n in items[:5]
-        )
-        resto = f" y {len(items) - 5} comprobante(s) más" if len(items) > 5 else ""
+        origen = "Libro" if tabla == "libro" else "RG90"
         raise HTTPException(
             status_code=422,
-            detail=(
-                f"El archivo tiene comprobantes repetidos en \"{tabla}\": {ejemplos}{resto}. "
-                "La comparación contra la RG90 espera una fila por comprobante y tipo (Factura o "
-                "Nota de Crédito), con los montos ya totalizados (así es como el RG90/SET los "
-                "reporta) — si el archivo trae una fila por ítem/línea de detalle (ej. distintas "
-                "tasas de IVA de una misma factura), hay que sumarlas en un único total por "
-                "comprobante antes de subirlo."
-            ),
+            detail={
+                "tipo": "comprobantes_duplicados",
+                "origen": origen,
+                "titulo": "Se detectaron comprobantes duplicados",
+                "mensaje": f"El archivo adjuntado del {origen} contiene comprobantes duplicados. Verificá los siguientes registros antes de continuar.",
+                "resumen": [{"origen": origen, "cantidad": len(items)}],
+                # Todos los items, sin cortar en 5 -- "cantidad" queda como número cuando se
+                # sabe exacto (duplicado dentro del mismo lote) o como texto ("2 o más")
+                # cuando es entre lotes distintos del archivo, igual que antes.
+                "detalle": [
+                    {
+                        "comprobante": doc,
+                        "tipo": tipo_doc,
+                        "cantidad": n if isinstance(n, int) else "2 o más",
+                        "origen": origen,
+                    }
+                    for (doc, tipo_doc), n in items
+                ],
+                "aclaracion": (
+                    "La comparación contra la RG90 requiere una única fila por comprobante y "
+                    "tipo (Factura o Nota de Crédito), con los montos totalizados, tal como son "
+                    "reportados por la RG90/SET.\n\nSi el archivo del Libro contiene varias filas "
+                    "correspondientes a los ítems o líneas de detalle de un mismo comprobante "
+                    "(por ejemplo, por distintas tasas de IVA), consolidá los importes en un "
+                    "único total por comprobante antes de subir el archivo."
+                ) if tabla == "libro" else None,
+            },
         )
 
 # /api/reconcile categoriza cada diff en una de estas etiquetas (ver
