@@ -52,7 +52,43 @@ except (OSError, AttributeError):
         pass
 
 
-def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str, lote: list) -> None:
+def _armar_error_duplicados(items: list[dict]) -> dict:
+    """Arma el detail estructurado de comprobantes_duplicados (tipo/origen/titulo/mensaje/
+    resumen/detalle/aclaracion) a partir de una lista ya detectada de items -- cada uno con
+    su propio origen ('Libro' o 'RG90'). Puede venir de un solo origen (las validaciones de
+    un archivo aislado, /api/validar-duplicados-libro y /api/validar-duplicados-rg90, o el
+    caso de siempre donde solo un lado tiene duplicados) o de AMBOS orígenes juntos (ver
+    /api/reconcile: cuando el libro y la RG90 tienen duplicados a la vez, se sigue cargando
+    y diagnosticando la RG90 aunque el libro ya haya fallado, para reportar TODO de una
+    sola vez -- antes se cortaba en el primer origen con problemas y la RG90 ni se
+    llegaba a leer, dejando sus duplicados sin reportar hasta una segunda vuelta)."""
+    origenes_presentes = [o for o in ("Libro", "RG90") if any(it["origen"] == o for it in items)]
+    resumen = [{"origen": o, "cantidad": sum(1 for it in items if it["origen"] == o)} for o in origenes_presentes]
+    if len(origenes_presentes) == 1:
+        origen_unico = origenes_presentes[0]
+        mensaje = f"El archivo adjuntado del {origen_unico} contiene comprobantes duplicados. Verificá los siguientes registros antes de continuar."
+    else:
+        origen_unico = None
+        mensaje = "Los archivos adjuntados del Libro y de la RG90 contienen comprobantes duplicados. Verificá los siguientes registros antes de continuar."
+    return {
+        "tipo": "comprobantes_duplicados",
+        "origen": origen_unico or "Ambos",
+        "titulo": "Se detectaron comprobantes duplicados",
+        "mensaje": mensaje,
+        "resumen": resumen,
+        "detalle": items,
+        "aclaracion": (
+            "La comparación contra la RG90 requiere una única fila por comprobante y "
+            "tipo (Factura o Nota de Crédito), con los montos totalizados, tal como son "
+            "reportados por la RG90/SET.\n\nSi el archivo del Libro contiene varias filas "
+            "correspondientes a los ítems o líneas de detalle de un mismo comprobante "
+            "(por ejemplo, por distintas tasas de IVA), consolidá los importes en un "
+            "único total por comprobante antes de subir el archivo."
+        ) if "Libro" in origenes_presentes else None,
+    }
+
+
+def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str, lote: list, acumulador: list | None = None) -> None:
     """Inserta un lote de (doc, tipo_doc, data) en `tabla` (libro o rg90 -- ver más abajo).
     (doc, tipo_doc) es PRIMARY KEY compuesta: el algoritmo de comparación (_comparar_par,
     engine.py) identifica un comprobante único por esa combinación, no por doc solo — un
@@ -65,6 +101,14 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
     negocio silencioso, peor que fallar ruidosamente). Si el insert choca, se identifica
     exactamente qué comprobante(s) vienen repetidos y se corta con un 422 explícito (en
     vez del IntegrityError de SQLite, que no expone ningún valor concreto).
+
+    acumulador=None (default): comportamiento de siempre, corta ACÁ MISMO con un 422 apenas
+    encuentra el primer lote con duplicados (usado por /api/validar-duplicados-libro y
+    /api/validar-duplicados-rg90, que validan un solo archivo aislado). Con acumulador=[]
+    (ver /api/reconcile), en cambio, NO corta -- solo agrega los duplicados de este lote a
+    la lista compartida y sigue, para poder terminar de cargar libro Y rg90 completos y
+    reportar los duplicados de ambos orígenes en un solo resultado consolidado (ver
+    _armar_error_duplicados).
 
     No usa ROLLBACK ni SAVEPOINT para deshacer el lote fallido a propósito: con
     journal_mode=OFF (ver más abajo, en la conexión) SQLite deja de poder revertir nada —
@@ -147,36 +191,22 @@ def _insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str
         # el listado COMPLETO, no truncado.
         items = sorted(conteos.items(), key=lambda kv: kv[1] if isinstance(kv[1], int) else -1, reverse=True)
         origen = "Libro" if tabla == "libro" else "RG90"
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "tipo": "comprobantes_duplicados",
+        # Todos los items, sin cortar en 5 -- "cantidad" queda como número cuando se sabe
+        # exacto (duplicado dentro del mismo lote) o como texto ("2 o más") cuando es entre
+        # lotes distintos del archivo, igual que antes.
+        detalle_items = [
+            {
+                "comprobante": doc,
+                "tipo": tipo_doc,
+                "cantidad": n if isinstance(n, int) else "2 o más",
                 "origen": origen,
-                "titulo": "Se detectaron comprobantes duplicados",
-                "mensaje": f"El archivo adjuntado del {origen} contiene comprobantes duplicados. Verificá los siguientes registros antes de continuar.",
-                "resumen": [{"origen": origen, "cantidad": len(items)}],
-                # Todos los items, sin cortar en 5 -- "cantidad" queda como número cuando se
-                # sabe exacto (duplicado dentro del mismo lote) o como texto ("2 o más")
-                # cuando es entre lotes distintos del archivo, igual que antes.
-                "detalle": [
-                    {
-                        "comprobante": doc,
-                        "tipo": tipo_doc,
-                        "cantidad": n if isinstance(n, int) else "2 o más",
-                        "origen": origen,
-                    }
-                    for (doc, tipo_doc), n in items
-                ],
-                "aclaracion": (
-                    "La comparación contra la RG90 requiere una única fila por comprobante y "
-                    "tipo (Factura o Nota de Crédito), con los montos totalizados, tal como son "
-                    "reportados por la RG90/SET.\n\nSi el archivo del Libro contiene varias filas "
-                    "correspondientes a los ítems o líneas de detalle de un mismo comprobante "
-                    "(por ejemplo, por distintas tasas de IVA), consolidá los importes en un "
-                    "único total por comprobante antes de subir el archivo."
-                ) if tabla == "libro" else None,
-            },
-        )
+            }
+            for (doc, tipo_doc), n in items
+        ]
+        if acumulador is not None:
+            acumulador.extend(detalle_items)
+            return
+        raise HTTPException(status_code=422, detail=_armar_error_duplicados(detalle_items))
 
 # /api/reconcile categoriza cada diff en una de estas etiquetas (ver
 # reconcile_with_rg90_iter en engine.py) -- solo estas 6 se resumen como contador en
@@ -383,12 +413,17 @@ async def ingest_files(
     }
 
 
-async def _cargar_libro_en_sqlite(con: sqlite3.Connection, pos_data_file: StarletteUploadFile) -> int:
+async def _cargar_libro_en_sqlite(con: sqlite3.Connection, pos_data_file: StarletteUploadFile, acumulador: list | None = None) -> int:
     """Carga el libro propio (streaming vía ijson) en la tabla `libro` de una base SQLite
     temporal, diagnosticando duplicados lote a lote (ver
     _insertar_lote_diagnosticando_duplicados). Extraída de /api/reconcile SIN CAMBIOS de
     comportamiento (mismo código, ahora reutilizable) para que /api/validar-duplicados-libro
-    pueda validar el libro apenas se adjunta, sin esperar a la RG90 ni a la comparación."""
+    pueda validar el libro apenas se adjunta, sin esperar a la RG90 ni a la comparación.
+
+    acumulador: ver _insertar_lote_diagnosticando_duplicados -- None (default) corta acá
+    mismo con un 422 apenas encuentra un duplicado; una lista (ver /api/reconcile) solo
+    acumula y sigue, para poder terminar de cargar también la RG90 y reportar los
+    duplicados de ambos orígenes juntos."""
     try:
         INSERT_BATCH = 5000
         cantidad_comprobantes = 0
@@ -401,10 +436,10 @@ async def _cargar_libro_en_sqlite(con: sqlite3.Connection, pos_data_file: Starle
             lote_insert.append((row["doc"], row.get("tipo_doc", ""), json.dumps(row)))
             cantidad_comprobantes += 1
             if len(lote_insert) >= INSERT_BATCH:
-                _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert)
+                _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert, acumulador)
                 lote_insert.clear()
         if lote_insert:
-            _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert)
+            _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert, acumulador)
             lote_insert.clear()
         return cantidad_comprobantes
     except (ValueError, KeyError) as e:
@@ -413,12 +448,12 @@ async def _cargar_libro_en_sqlite(con: sqlite3.Connection, pos_data_file: Starle
         await pos_data_file.close()
 
 
-async def _cargar_rg90_en_sqlite(con: sqlite3.Connection, rg90_files: list) -> tuple:
+async def _cargar_rg90_en_sqlite(con: sqlite3.Connection, rg90_files: list, acumulador: list | None = None) -> tuple:
     """Carga la(s) RG90 (streaming vía engine.ingest_file_streaming) en la tabla `rg90` de
     una base SQLite temporal, diagnosticando duplicados lote a lote. Extraída de
     /api/reconcile SIN CAMBIOS de comportamiento -- ver docstring de
     _cargar_libro_en_sqlite, mismo motivo (reutilizarla desde
-    /api/validar-duplicados-rg90)."""
+    /api/validar-duplicados-rg90). acumulador: mismo criterio que en esa función."""
     loop = asyncio.get_event_loop()
 
     def _leer_e_insertar_rg90(tmp_path: str) -> tuple:
@@ -427,7 +462,7 @@ async def _cargar_rg90_en_sqlite(con: sqlite3.Connection, rg90_files: list) -> t
         total = 0
         gaps_input = []
         for i, chunk in enumerate(engine.ingest_file_streaming(tmp_path, "rg90_set", "RG90 SET"), start=1):
-            _insertar_lote_diagnosticando_duplicados(con, "rg90", [(r["doc"], r.get("tipo_doc", ""), json.dumps(r)) for r in chunk])
+            _insertar_lote_diagnosticando_duplicados(con, "rg90", [(r["doc"], r.get("tipo_doc", ""), json.dumps(r)) for r in chunk], acumulador)
             gaps_input.extend({"doc": r["doc"], "tipo_doc": r["tipo_doc"], "local": r["local"], "sistema": r["sistema"]} for r in chunk)
             total += len(chunk)
             if i % 10 == 0:
@@ -595,13 +630,21 @@ async def reconcile(
     con, tmp_dir_sqlite = _nueva_sqlite_temporal()
 
     try:
+        # acumulador COMPARTIDO entre libro y rg90: si el libro ya tiene duplicados, antes
+        # se cortaba acá mismo con un 422 y la RG90 ni se llegaba a cargar -- si la RG90
+        # TAMBIÉN tenía duplicados, el usuario los veía recién en un segundo intento,
+        # después de corregir el libro. Pasándoles la misma lista a las dos cargas, ninguna
+        # corta sola: cada duplicado que encuentran se acumula acá y se sigue cargando todo
+        # (libro completo, después rg90 completa) para poder reportar TODO junto al final.
+        duplicados_acumulados: list = []
+
         # Carga en streaming: ijson va entregando filas del archivo (nunca el documento
         # completo en memoria) y se insertan en lotes de INSERT_BATCH filas por
         # executemany -- nunca existe un `libro_map`/lista de 200.000 dicts en Python al
         # mismo tiempo, solo el lote chico que se está por insertar. Ver
         # _cargar_libro_en_sqlite (extraída de acá, sin cambios, para poder reutilizarla
         # también desde /api/validar-duplicados-libro).
-        cantidad_comprobantes = await _cargar_libro_en_sqlite(con, pos_data_file)
+        cantidad_comprobantes = await _cargar_libro_en_sqlite(con, pos_data_file, duplicados_acumulados)
 
         # Lectura de la(s) RG90 -- SIN CAMBIOS, sigue siendo engine.ingest_file tal cual
         # (motor de parseo de Excel), sin cambiar ni una línea de ese archivo. En vez de
@@ -612,7 +655,12 @@ async def reconcile(
         # Cada bloque se inserta en SQLite y se descarta antes de leer el siguiente --
         # nunca existe una lista de 200.000 filas completas de la RG90 en memoria. Ver
         # _cargar_rg90_en_sqlite (extraída de acá, sin cambios, mismo motivo de arriba).
-        rg90_total_rows, rg90_gaps_input = await _cargar_rg90_en_sqlite(con, rg90_files)
+        rg90_total_rows, rg90_gaps_input = await _cargar_rg90_en_sqlite(con, rg90_files, duplicados_acumulados)
+
+        # Recién ACÁ, con libro y rg90 ya completos, se corta si hubo duplicados en
+        # cualquiera de los dos lados (o ambos) -- un solo 422 con el detalle consolidado.
+        if duplicados_acumulados:
+            raise HTTPException(status_code=422, detail=_armar_error_duplicados(duplicados_acumulados))
 
         con.commit()
         # Saltos de numeración DENTRO de la RG90 misma (no contra el libro propio) — mismo
