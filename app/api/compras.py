@@ -144,7 +144,11 @@ async def reconcile_compras(
 
     no_en_rg = len([d for d in diffs if d["diferencia"] == "No llegó a la interfaz"])
     no_en_libro = len([d for d in diffs if d["diferencia"] == "No existe en el libro"])
-    diferencia_monto = len([d for d in diffs if d["diferencia"] == "Diferencia de monto"])
+    # Regla 1 / Regla 2 del Paso de Resultados (ver engine.py/compras_engine.py): el Total
+    # tiene precedencia sobre las tasas, así que ambas categorías son mutuamente excluyentes
+    # para un mismo comprobante.
+    diferencia_importe = len([d for d in diffs if d["diferencia"] == "Diferencia de importe"])
+    diferencias_tasas = len([d for d in diffs if d["diferencia"] == "Diferencias en tasas"])
     # Ahora que reconcile_compras_with_rg informa "Coincide" como categoría real (antes no
     # guardaba nada para esos comprobantes), se cuenta directo en vez de por resta.
     coinciden = len([d for d in diffs if d["diferencia"] == "Coincide"])
@@ -179,7 +183,8 @@ async def reconcile_compras(
         "coinciden": coinciden,
         "no_en_rg": no_en_rg,
         "no_en_libro": no_en_libro,
-        "diferencia_monto": diferencia_monto,
+        "diferencia_importe": diferencia_importe,
+        "diferencias_tasas": diferencias_tasas,
         "saltos_rg": len(rg_gaps),
     })
 
@@ -199,6 +204,7 @@ async def reconcile_compras(
             "coinciden": coinciden,
             "no_en_rg": no_en_rg,
             "no_en_libro": no_en_libro,
-            "diferencia_monto": diferencia_monto,
+            "diferencia_importe": diferencia_importe,
+            "diferencias_tasas": diferencias_tasas,
         },
     }

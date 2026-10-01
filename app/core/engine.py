@@ -1499,6 +1499,16 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
         campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
 
         if campo_diffs:
+            # Regla 1 / Regla 2 del Paso de Resultados (especificación funcional del
+            # cliente): si el Total difiere, la observación es "Diferencia de importe" sin
+            # importar si además hay diferencias en alguna tasa (Regla 1 tiene precedencia
+            # sobre la 2). Si el Total coincide pero alguna tasa (IVA 10%, IVA 5% o Exenta)
+            # difiere, la observación es "Diferencias en tasas". Mutuamente excluyentes:
+            # nunca se informan las dos a la vez para el mismo comprobante. diferencias_detalle
+            # no cambia -- sigue con TODOS los campos que difieren, Total incluido si
+            # corresponde, para que la grilla siga mostrando en 0 solo lo que no causa la
+            # diferencia (ver valorCeldaDiffVentas en el frontend).
+            diferencia = "Diferencia de importe" if "total" in campo_diffs else "Diferencias en tasas"
             return {
                 "doc": doc,
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
@@ -1506,7 +1516,7 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
                 "local": pos_rec["local"],
                 "libro": _lado_diff_ventas(pos_rec),
                 "rg90": _lado_diff_ventas(rg_rec),
-                "diferencia": "Diferencia de monto",
+                "diferencia": diferencia,
                 "diferencias_detalle": campo_diffs,
             }
         elif rg_rec.get("estado", "").lower() == "rechazada":

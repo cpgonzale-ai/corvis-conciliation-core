@@ -156,9 +156,16 @@ def _format_gs(n: float) -> str:
     return s.replace(",", "§").replace(".", ",").replace("§", ".")
 
 
+# Las dos observaciones del Paso de Resultados que traen diferencias_detalle (Regla 1 / Regla
+# 2 -- ver _comparar_par en engine.py): "Diferencia de importe" (el Total difiere) y
+# "Diferencias en tasas" (el Total coincide pero alguna tasa difiere). Mutuamente excluyentes,
+# pero ambas se tratan igual acá: el campo que no causó la diferencia se muestra en 0.
+_DIFERENCIA_CON_DETALLE = ("Diferencia de importe", "Diferencias en tasas")
+
+
 def _valor_celda(d: RG90DiffRowIn, lado: str, campo: str) -> str:
     valor = getattr(d.libro if lado == "libro" else d.rg90, campo)
-    if d.diferencia != "Diferencia de monto" or valor == "—":
+    if d.diferencia not in _DIFERENCIA_CON_DETALLE or valor == "—":
         return valor
     detalle = d.diferencias_detalle or {}
     return valor if campo in detalle else "0,00"
@@ -173,7 +180,7 @@ def _diferencia_campo(d: RG90DiffRowIn, campo: str) -> str:
     # correctamente al comparar (guardado en diferencias_detalle), en vez de recalcularlo acá
     # con una resta que no contempla el signo de las NC.
     detalle = d.diferencias_detalle or {}
-    if d.diferencia == "Diferencia de monto" and campo in detalle:
+    if d.diferencia in _DIFERENCIA_CON_DETALLE and campo in detalle:
         return _format_gs(detalle[campo])
     return _format_gs(_parse_gs(_valor_celda(d, "libro", campo)) - _parse_gs(_valor_celda(d, "rg90", campo)))
 

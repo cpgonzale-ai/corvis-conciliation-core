@@ -341,6 +341,13 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
             campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
 
             if campo_diffs:
+                # Regla 1 / Regla 2 del Paso de Resultados (misma especificación funcional
+                # que engine.py, Ventas): si el Total difiere, la observación es "Diferencia
+                # de importe" sin importar si además hay diferencias en alguna tasa (Regla 1
+                # tiene precedencia). Si el Total coincide pero alguna tasa (IVA 10%, IVA 5%
+                # o Exenta) difiere, la observación es "Diferencias en tasas". Mutuamente
+                # excluyentes.
+                diferencia = "Diferencia de importe" if "total" in campo_diffs else "Diferencias en tasas"
                 diffs.append({
                     "doc": pos_rec["doc"],
                     "tipo_doc": pos_rec.get("tipo_doc", ""),
@@ -349,7 +356,7 @@ def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Di
                     "local": pos_rec["local"],
                     "libro": _lado_diff(pos_rec),
                     "rg": _lado_diff(rg_rec),
-                    "diferencia": "Diferencia de monto",
+                    "diferencia": diferencia,
                     "diferencias_detalle": campo_diffs,
                 })
             else:

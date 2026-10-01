@@ -219,7 +219,8 @@ _CATEGORIA_A_CONTADOR_RECONCILE = {
     "No existe en el libro": "no_en_libro",
     "Salto de numeración": "saltos",
     "Anulada": "anuladas",
-    "Diferencia de monto": "diferencia_monto",
+    "Diferencia de importe": "diferencia_importe",
+    "Diferencias en tasas": "diferencias_tasas",
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "profiles")
@@ -689,7 +690,7 @@ async def reconcile(
         # ERR_EMPTY_RESPONSE de antes, pero con el motivo real en el log del servidor en
         # vez de un worker muerto sin rastro.
         try:
-            counts = {"coinciden": 0, "no_en_rg90": 0, "no_en_libro": 0, "saltos": 0, "anuladas": 0, "diferencia_monto": 0}
+            counts = {"coinciden": 0, "no_en_rg90": 0, "no_en_libro": 0, "saltos": 0, "anuladas": 0, "diferencia_importe": 0, "diferencias_tasas": 0}
 
             # Yield-ear pieza por pieza (una por fila) funciona para el objetivo de memoria,
             # pero cada yield de un StreamingResponse termina en un write() de socket propio
