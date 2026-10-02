@@ -294,87 +294,101 @@ class ComprasEngine:
         return rows
 
 
-def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Full outer join por clave (documento + RUC del proveedor sin DV) — mismo control por
-    campo (Total/IVA 10%/IVA 5%/Exenta) que `reconcile_with_rg90`, pero con la clave
-    compuesta que exige compras (ver Minuta 5 y la fórmula real del Excel de control del
-    cliente: SUMIF por clave concatenada)."""
-    libro_map = {r["clave"]: r for r in libro_rows}
-    rg_map = {r["clave"]: r for r in rg_rows}
+def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Dict[str, Any] | None) -> Dict[str, Any]:
+    """La lógica de negocio de la comparación, para UN comprobante a la vez -- extraída tal
+    cual del loop que tenía reconcile_compras_with_rg (sin cambiar ninguna rama ni regla),
+    para poder alimentarla tanto desde los dos mapas completos en memoria (esa función,
+    abajo) como desde un cursor de un JOIN hecho en SQLite (reconcile_compras_with_rg_iter_pares,
+    y app/api/compras.py) sin duplicar ni una condición -- mismo criterio que _comparar_par
+    en engine.py (Ventas)."""
+    if pos_rec and not rg_rec:
+        return {
+            "doc": pos_rec["doc"],
+            "tipo_doc": pos_rec.get("tipo_doc", ""),
+            "proveedor": pos_rec["proveedor"],
+            "sistema": pos_rec["sistema"],
+            "local": pos_rec["local"],
+            "libro": _lado_diff(pos_rec),
+            "rg": _lado_diff(None),
+            "diferencia": "No llegó a la interfaz",
+        }
+    elif rg_rec and not pos_rec:
+        return {
+            "doc": rg_rec["doc"],
+            "tipo_doc": rg_rec.get("tipo_doc", ""),
+            "proveedor": rg_rec["proveedor"],
+            "sistema": rg_rec.get("sistema", "RG"),
+            "local": rg_rec.get("local", "Desconocido"),
+            "libro": _lado_diff(None),
+            "rg": _lado_diff(rg_rec),
+            "diferencia": "No existe en el libro",
+        }
+    else:
+        campo_diffs = {
+            "total": _monto_diff(abs(pos_rec["total_num"]), abs(rg_rec["total_num"])),
+            "iva_10": _monto_diff(abs(pos_rec.get("iva_num", 0.0)), abs(rg_rec.get("iva_num", 0.0))),
+            "iva_5": _monto_diff(abs(pos_rec.get("iva_5_num", 0.0)), abs(rg_rec.get("iva_5_num", 0.0))),
+            "exenta": _monto_diff(abs(pos_rec.get("exentas_num", 0.0)), abs(rg_rec.get("exentas_num", 0.0))),
+        }
+        campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
 
-    all_claves = set(libro_map.keys()).union(set(rg_map.keys()))
-    diffs: List[Dict[str, Any]] = []
-
-    for clave in sorted(all_claves):
-        pos_rec = libro_map.get(clave)
-        rg_rec = rg_map.get(clave)
-
-        if pos_rec and not rg_rec:
-            diffs.append({
+        if campo_diffs:
+            # Regla 1 / Regla 2 del Paso de Resultados (misma especificación funcional
+            # que engine.py, Ventas): si el Total difiere, la observación es "Diferencia
+            # de importe" sin importar si además hay diferencias en alguna tasa (Regla 1
+            # tiene precedencia). Si el Total coincide pero alguna tasa (IVA 10%, IVA 5%
+            # o Exenta) difiere, la observación es "Diferencias en tasas". Mutuamente
+            # excluyentes.
+            diferencia = "Diferencia de importe" if "total" in campo_diffs else "Diferencias en tasas"
+            return {
                 "doc": pos_rec["doc"],
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "proveedor": pos_rec["proveedor"],
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
                 "libro": _lado_diff(pos_rec),
-                "rg": _lado_diff(None),
-                "diferencia": "No llegó a la interfaz",
-            })
-        elif rg_rec and not pos_rec:
-            diffs.append({
-                "doc": rg_rec["doc"],
-                "tipo_doc": rg_rec.get("tipo_doc", ""),
-                "proveedor": rg_rec["proveedor"],
-                "sistema": rg_rec.get("sistema", "RG"),
-                "local": rg_rec.get("local", "Desconocido"),
-                "libro": _lado_diff(None),
                 "rg": _lado_diff(rg_rec),
-                "diferencia": "No existe en el libro",
-            })
-        elif pos_rec and rg_rec:
-            campo_diffs = {
-                "total": _monto_diff(abs(pos_rec["total_num"]), abs(rg_rec["total_num"])),
-                "iva_10": _monto_diff(abs(pos_rec.get("iva_num", 0.0)), abs(rg_rec.get("iva_num", 0.0))),
-                "iva_5": _monto_diff(abs(pos_rec.get("iva_5_num", 0.0)), abs(rg_rec.get("iva_5_num", 0.0))),
-                "exenta": _monto_diff(abs(pos_rec.get("exentas_num", 0.0)), abs(rg_rec.get("exentas_num", 0.0))),
+                "diferencia": diferencia,
+                "diferencias_detalle": campo_diffs,
             }
-            campo_diffs = {k: v for k, v in campo_diffs.items() if v is not None}
+        else:
+            # Mismo criterio que reconcile_with_rg90: el comprobante coincide (mismo doc
+            # + RUC del proveedor en ambos lados, sin diferencia de monto) — antes no se
+            # guardaba nada acá y la tarjeta "Coinciden" no tenía filas reales detrás.
+            return {
+                "doc": pos_rec["doc"],
+                "tipo_doc": pos_rec.get("tipo_doc", ""),
+                "proveedor": pos_rec["proveedor"],
+                "sistema": pos_rec["sistema"],
+                "local": pos_rec["local"],
+                "libro": _lado_diff(pos_rec),
+                "rg": _lado_diff(rg_rec),
+                "diferencia": "Coincide",
+            }
 
-            if campo_diffs:
-                # Regla 1 / Regla 2 del Paso de Resultados (misma especificación funcional
-                # que engine.py, Ventas): si el Total difiere, la observación es "Diferencia
-                # de importe" sin importar si además hay diferencias en alguna tasa (Regla 1
-                # tiene precedencia). Si el Total coincide pero alguna tasa (IVA 10%, IVA 5%
-                # o Exenta) difiere, la observación es "Diferencias en tasas". Mutuamente
-                # excluyentes.
-                diferencia = "Diferencia de importe" if "total" in campo_diffs else "Diferencias en tasas"
-                diffs.append({
-                    "doc": pos_rec["doc"],
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "proveedor": pos_rec["proveedor"],
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff(pos_rec),
-                    "rg": _lado_diff(rg_rec),
-                    "diferencia": diferencia,
-                    "diferencias_detalle": campo_diffs,
-                })
-            else:
-                # Mismo criterio que reconcile_with_rg90: el comprobante coincide (mismo doc
-                # + RUC del proveedor en ambos lados, sin diferencia de monto) — antes no se
-                # guardaba nada acá y la tarjeta "Coinciden" no tenía filas reales detrás.
-                diffs.append({
-                    "doc": pos_rec["doc"],
-                    "tipo_doc": pos_rec.get("tipo_doc", ""),
-                    "proveedor": pos_rec["proveedor"],
-                    "sistema": pos_rec["sistema"],
-                    "local": pos_rec["local"],
-                    "libro": _lado_diff(pos_rec),
-                    "rg": _lado_diff(rg_rec),
-                    "diferencia": "Coincide",
-                })
 
-    return diffs
+def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Full outer join por clave (documento + RUC del proveedor sin DV) — mismo control por
+    campo (Total/IVA 10%/IVA 5%/Exenta) que `reconcile_with_rg90`, pero con la clave
+    compuesta que exige compras (ver Minuta 5 y la fórmula real del Excel de control del
+    cliente: SUMIF por clave concatenada). Wrapper sobre _comparar_par_compras para quien
+    tenga los dos mapas completos en memoria -- /api/compras/reconcile usa en cambio
+    reconcile_compras_with_rg_iter_pares, sobre un cursor de un JOIN en SQLite."""
+    libro_map = {r["clave"]: r for r in libro_rows}
+    rg_map = {r["clave"]: r for r in rg_rows}
+
+    all_claves = set(libro_map.keys()).union(set(rg_map.keys()))
+    return [_comparar_par_compras(clave, libro_map.get(clave), rg_map.get(clave)) for clave in sorted(all_claves)]
+
+
+def reconcile_compras_with_rg_iter_pares(pares):
+    """Misma lógica de comparación que reconcile_compras_with_rg, para pares (clave,
+    pos_rec_o_None, rg_rec_o_None) ya emparejados de antemano -- pensado para recibir
+    directo el cursor de un JOIN hecho en SQLite (ver app/api/compras.py), sin necesitar
+    los dos mapas completos en memoria de Python al mismo tiempo. Mismo criterio que
+    reconcile_with_rg90_iter_pares en engine.py (Ventas)."""
+    for clave, pos_rec, rg_rec in pares:
+        yield _comparar_par_compras(clave, pos_rec, rg_rec)
 
 
 def _lado_diff(rec: Dict[str, Any] | None) -> Dict[str, str]:
