@@ -75,6 +75,24 @@ def _parse_monto_latino(s: str) -> float | None:
         return None
 
 
+# CSV/Formula Injection corregido acá: varios de los valores que terminan en una celda de
+# texto vienen de campos libres del Excel que subió el usuario (ej. "proveedor"/"local" en
+# compras_engine.py, solo pasan por fix_mojibake, nunca sanitizados contra esto) -- si una
+# razón social real empieza con "=", "+", "-" o "@", Excel evalúa esa celda como fórmula al
+# abrir el archivo exportado (puede exfiltrar datos de la planilla con "=HYPERLINK(...)", o
+# en versiones viejas de Excel con DDE habilitado, intentar ejecutar un comando). Se antepone
+# una comilla simple -- el estándar para forzar que Excel trate la celda siempre como texto
+# literal, nunca como fórmula -- a cualquier valor de texto que empiece con uno de esos
+# caracteres (tras strip()).
+_FORMULA_INJECTION_CHARS = ("=", "+", "-", "@")
+
+
+def _neutralizar_formula(valor: str) -> str:
+    if valor.strip().startswith(_FORMULA_INJECTION_CHARS):
+        return "'" + valor
+    return valor
+
+
 def _xlsx_response(filename: str, sheet_name: str, headers: list[str], filas) -> StreamingResponse:
     """filas: iterable de listas de valores, ya en el orden de headers. constant_memory=True:
     XlsxWriter descarta cada fila de la hoja de la memoria apenas la escribe al archivo (no
@@ -105,7 +123,7 @@ def _xlsx_response(filename: str, sheet_name: str, headers: list[str], filas) ->
         for col, valor in enumerate(fila):
             numero = _parse_monto_latino(valor) if isinstance(valor, str) else None
             if numero is None:
-                ws.write_string(row, col, valor)
+                ws.write_string(row, col, _neutralizar_formula(valor))
             else:
                 ws.write_number(row, col, numero, numfmt)
     wb.close()

@@ -121,6 +121,14 @@ async def reconcile_compras(
         raise HTTPException(status_code=422, detail="Faltan los archivos de RG o el libro de compras a comparar.")
     lote_id_raw = form.get("lote_id")
     lote_id = int(lote_id_raw) if lote_id_raw else None
+    # IDOR corregido acá (mismo fix que /api/reconcile en main.py): lote_id viaja como
+    # campo de formulario controlado por el cliente -- sin este chequeo, cualquier usuario
+    # autenticado podía reescribir el estado y el resultado de un lote de OTRO usuario con
+    # solo mandar su id. 404 en vez de 403 para no confirmar si ese lote existe.
+    if lote_id is not None:
+        lote_ajeno = db.get(LoteProcesamiento, lote_id)
+        if lote_ajeno is not None and lote_ajeno.usuario_id != usuario.id:
+            raise HTTPException(status_code=404, detail="Lote no encontrado.")
     pos_rows = json.loads(pos_data_json)
 
     rg_rows = []
@@ -132,6 +140,13 @@ async def reconcile_compras(
                 file_rows = await loop.run_in_executor(None, engine.ingest_file, tmp_path, "rg_compras", "RG")
             except ValueError as e:
                 raise HTTPException(status_code=422, detail=str(e))
+            except Exception:
+                # Mismo fix que ya tiene ingest_compras más arriba en este archivo (y
+                # /api/ingest en main.py, Ventas): un PDF renombrado o un .xlsx corrupto
+                # tira python_calamine.CalamineError, que no es ValueError -- sin este
+                # except escapaba como 500 genérico en vez del 422 explícito que el
+                # frontend ya sabe mostrar. No se había portado a este endpoint.
+                raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
             rg_rows.extend(file_rows)
 
     diffs = reconcile_compras_with_rg(pos_rows, rg_rows)

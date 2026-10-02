@@ -424,12 +424,22 @@ async def _cargar_libro_en_sqlite(con: sqlite3.Connection, pos_data_file: Starle
     acumulador: ver _insertar_lote_diagnosticando_duplicados -- None (default) corta acá
     mismo con un 422 apenas encuentra un duplicado; una lista (ver /api/reconcile) solo
     acumula y sigue, para poder terminar de cargar también la RG90 y reportar los
-    duplicados de ambos orígenes juntos."""
-    try:
+    duplicados de ambos orígenes juntos.
+
+    Corrido en un thread del executor (ver _leer_e_insertar_libro) -- antes este bucle
+    (ijson + inserts a SQLite) corría directo dentro de la coroutine async, bloqueando el
+    event loop entero del worker mientras duraba: cualquier otro pedido a ese worker
+    (incluido /api/health de otro usuario) quedaba inmóvil. Mismo criterio que ya usaba
+    _cargar_rg90_en_sqlite, acá abajo, para el mismo motivo -- esta función se había
+    quedado afuera cuando se aplicó ese fix."""
+    loop = asyncio.get_event_loop()
+
+    def _leer_e_insertar_libro() -> int:
+        """Corre en un thread del executor -- con se creó con check_same_thread=False
+        (ver _nueva_sqlite_temporal) específicamente para poder usarse desde acá."""
         INSERT_BATCH = 5000
         cantidad_comprobantes = 0
         lote_insert: list[tuple] = []
-        pos_data_file.file.seek(0)
         # use_float=True: por defecto ijson devuelve los números como decimal.Decimal en
         # vez de float como hacía json.loads() -- sin esto, _monto_diff() revienta con
         # TypeError al restar un Decimal (de acá) contra un float (del lado RG90).
@@ -443,6 +453,10 @@ async def _cargar_libro_en_sqlite(con: sqlite3.Connection, pos_data_file: Starle
             _insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert, acumulador)
             lote_insert.clear()
         return cantidad_comprobantes
+
+    try:
+        pos_data_file.file.seek(0)
+        return await loop.run_in_executor(None, _leer_e_insertar_libro)
     except (ValueError, KeyError) as e:
         raise HTTPException(status_code=422, detail=f"El libro enviado para comparar no tiene el formato esperado: {e}")
     finally:
@@ -624,6 +638,17 @@ async def reconcile(
         )
     lote_id_raw = form.get("lote_id")
     lote_id = int(lote_id_raw) if lote_id_raw else None
+    # IDOR corregido acá: lote_id viaja como campo de formulario controlado por el cliente
+    # (son enteros secuenciales, fácilmente adivinables) -- sin este chequeo, cualquier
+    # usuario autenticado podía reescribir el estado y el resultado de un lote de OTRO
+    # usuario con solo mandar su id. Se valida ANTES de empezar el streaming (acá, no
+    # dentro de _generar_respuesta) porque una vez que arrancó la respuesta los headers ya
+    # salieron y no se puede devolver un HTTPException limpio. 404 en vez de 403 para no
+    # confirmarle a quien prueba IDs ajenos si ese lote existe o no.
+    if lote_id is not None:
+        lote_ajeno = db.get(LoteProcesamiento, lote_id)
+        if lote_ajeno is not None and lote_ajeno.usuario_id != usuario.id:
+            raise HTTPException(status_code=404, detail="Lote no encontrado.")
 
     # Base SQLite temporal, un directorio por pedido, borrado siempre en el finally de
     # _generar_respuesta() más abajo (o acá mismo si algo falla antes de llegar a esa

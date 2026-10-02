@@ -42,7 +42,7 @@ class Usuario(Base):
     # código existente que ya compara usuario.rol == "admin" (ej. require_admin). Se
     # mantiene sincronizado con roles.nombre cada vez que se asigna un rol_id.
     rol: Mapped[str] = mapped_column(String(20), nullable=False, default="operador")
-    rol_id: Mapped[int | None] = mapped_column(ForeignKey("roles.id"), nullable=True)
+    rol_id: Mapped[int | None] = mapped_column(ForeignKey("roles.id"), nullable=True, index=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
@@ -135,7 +135,7 @@ class ArchivoProcesado(Base):
     __tablename__ = "archivos_procesados"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    lote_id: Mapped[int] = mapped_column(ForeignKey("lotes_procesamiento.id"), nullable=False)
+    lote_id: Mapped[int] = mapped_column(ForeignKey("lotes_procesamiento.id"), nullable=False, index=True)
     nombre_archivo: Mapped[str] = mapped_column(String(255), nullable=False)
     perfil: Mapped[str] = mapped_column(String(30), nullable=False)
     fecha_carga: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -147,7 +147,7 @@ class ResultadoRG90(Base):
     __tablename__ = "resultados_rg90"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    lote_id: Mapped[int] = mapped_column(ForeignKey("lotes_procesamiento.id"), nullable=False)
+    lote_id: Mapped[int] = mapped_column(ForeignKey("lotes_procesamiento.id"), nullable=False, index=True)
     archivo_rg90_nombre: Mapped[str] = mapped_column(String(255), nullable=False)
     total_coinciden: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_no_en_rg90: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
