@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 480  # 8 horas
     cors_origins: str = "*"
+    # Límite de concurrencia para los 4 endpoints pesados (ingest/reconcile de Ventas y
+    # Compras) -- Plan de Acción de la auditoría del 02/10, Pilar 5: sin esto, nada impide
+    # que N usuarios disparando una comparación grande a la vez acumulen cientos de MB cada
+    # uno en el mismo worker, sobre un host medido con poco margen real de RAM libre. Es
+    # POR PROCESO (cada worker de --workers tiene su propio semáforo, no se comparte entre
+    # procesos) -- con --workers 2 y el default de acá, el techo real de la app completa es
+    # 2x este valor. Configurable por .env para ajustar sin tocar código si cambia el
+    # margen real de memoria del host.
+    max_operaciones_pesadas_concurrentes: int = 2
 
     @property
     def cors_origins_list(self) -> list[str]:

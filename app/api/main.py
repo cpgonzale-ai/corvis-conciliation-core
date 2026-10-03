@@ -27,6 +27,7 @@ from app.api.export import router as export_router
 from app.api.locales import router as locales_router
 from app.api.roles import router as roles_router
 from app.core.audit import log_evento as _log_evento
+from app.core.concurrencia import adquirir_operacion_pesada, liberar_operacion_pesada
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90_iter_pares
@@ -150,6 +151,28 @@ async def ingest_files(
     tipo_libro: str = Form("venta"),
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(get_current_user),
+):
+    """Límite de concurrencia (Plan de Acción del 02/10, Pilar 5): acá no hay streaming de
+    salida (a diferencia de /api/reconcile) -- toda la memoria pesada se libera sola apenas
+    esta función retorna, así que adquirir/liberar alrededor de la función entera alcanza,
+    sin necesitar el truco del finally-en-el-generador que sí hace falta en /api/reconcile.
+    El cuerpo real está en _ingest_files_impl, sin cambios -- esta función es solo el
+    wrapper del semáforo."""
+    await adquirir_operacion_pesada()
+    try:
+        return await _ingest_files_impl(request, files, system_key, local_name, tipo_libro, db, usuario)
+    finally:
+        liberar_operacion_pesada()
+
+
+async def _ingest_files_impl(
+    request: Request,
+    files: List[UploadFile],
+    system_key: str,
+    local_name: Optional[str],
+    tipo_libro: str,
+    db: Session,
+    usuario: Usuario,
 ):
     # "auto" (el Paso 1 ya no tiene selector): se prueba cada perfil de venta conocido, por
     # archivo, hasta encontrar el que matchea. Un system_key explícito (aloha/hiopos/
@@ -492,6 +515,14 @@ async def reconcile(
         if lote_ajeno is not None and lote_ajeno.usuario_id != usuario.id:
             raise HTTPException(status_code=404, detail="Lote no encontrado.")
 
+    # Límite de concurrencia (Plan de Acción del 02/10, Pilar 5): se adquiere ACÁ, después
+    # de las validaciones rápidas de arriba (que no consumen memoria real) y antes de crear
+    # el SQLite temporal -- se libera recién en el finally de _generar_respuesta(), más
+    # abajo, porque el trabajo pesado real sigue corriendo DESPUÉS de que esta función
+    # retorne el StreamingResponse (ver docstring de liberar_operacion_pesada). Si algo
+    # falla ANTES de llegar a armar el generador (los dos except de abajo), se libera ahí.
+    await adquirir_operacion_pesada()
+
     # Base SQLite temporal, un directorio por pedido, borrado siempre en el finally de
     # _generar_respuesta() más abajo (o acá mismo si algo falla antes de llegar a esa
     # parte). Nunca ':memory:' -- eso seguiría siendo RAM del proceso, no bajaría nada.
@@ -541,10 +572,12 @@ async def reconcile(
     except HTTPException:
         con.close()
         shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
+        liberar_operacion_pesada()
         raise
     except Exception as e:
         con.close()
         shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
+        liberar_operacion_pesada()
         raise HTTPException(status_code=500, detail=f"Error inesperado al leer los archivos para comparar ({type(e).__name__}): {e}")
 
     nombres_rg90 = ", ".join(f.filename for f in rg90_files)
@@ -700,6 +733,9 @@ async def reconcile(
             con.close()
             shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
             gc.collect()
+            # Recién ACÁ se libera el slot del semáforo de concurrencia -- ver dónde se
+            # adquirió, más arriba en reconcile(), y el docstring de liberar_operacion_pesada.
+            liberar_operacion_pesada()
 
     return StreamingResponse(_generar_respuesta(), media_type="application/json")
 

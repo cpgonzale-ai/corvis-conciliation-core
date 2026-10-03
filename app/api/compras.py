@@ -19,6 +19,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.core.audit import log_evento as _log_evento
 from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg_iter_pares
+from app.core.concurrencia import adquirir_operacion_pesada, liberar_operacion_pesada
 from app.core.engine import detect_sequence_gaps
 from app.core.deps import get_current_user
 from app.core.sqlite_cruce import armar_error_duplicados, insertar_lote_diagnosticando_duplicados, nueva_sqlite_temporal
@@ -132,6 +133,24 @@ async def ingest_compras(
     db: Session = Depends(get_db),
     usuario: Usuario = Depends(get_current_user),
 ):
+    """Límite de concurrencia (Plan de Acción del 02/10, Pilar 5): mismo criterio que
+    /api/ingest (Ventas) -- sin streaming de salida acá, así que adquirir/liberar
+    alrededor de la función entera alcanza. El cuerpo real está en
+    _ingest_compras_impl, sin cambios."""
+    await adquirir_operacion_pesada()
+    try:
+        return await _ingest_compras_impl(request, files, local_name, db, usuario)
+    finally:
+        liberar_operacion_pesada()
+
+
+async def _ingest_compras_impl(
+    request: Request,
+    files: List[UploadFile],
+    local_name: Optional[str],
+    db: Session,
+    usuario: Usuario,
+):
     all_rows = []
     loop = asyncio.get_event_loop()
     profile_usado = "compras_sistema"
@@ -241,6 +260,14 @@ async def reconcile_compras(
         if lote_ajeno is not None and lote_ajeno.usuario_id != usuario.id:
             raise HTTPException(status_code=404, detail="Lote no encontrado.")
 
+    # Límite de concurrencia (Plan de Acción del 02/10, Pilar 5): mismo criterio que
+    # /api/reconcile (main.py) -- se adquiere acá, después de las validaciones rápidas de
+    # arriba, y se libera recién en el finally de _generar_respuesta() más abajo (el
+    # trabajo pesado real sigue corriendo después de que esta función retorne el
+    # StreamingResponse). Si algo falla antes de llegar al generador, se libera en los dos
+    # except de abajo.
+    await adquirir_operacion_pesada()
+
     con, tmp_dir_sqlite = nueva_sqlite_temporal(tabla_a="libro", tabla_b="rg")
     try:
         # acumulador compartido entre libro y RG -- mismo criterio que /api/reconcile:
@@ -271,10 +298,12 @@ async def reconcile_compras(
     except HTTPException:
         con.close()
         shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
+        liberar_operacion_pesada()
         raise
     except Exception as e:
         con.close()
         shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
+        liberar_operacion_pesada()
         raise HTTPException(status_code=500, detail=f"Error inesperado al leer los archivos para comparar ({type(e).__name__}): {e}")
 
     nombres_rg = ", ".join(f.filename for f in rg_files)
@@ -398,5 +427,8 @@ async def reconcile_compras(
             con.close()
             shutil.rmtree(tmp_dir_sqlite, ignore_errors=True)
             gc.collect()
+            # Recién ACÁ se libera el slot del semáforo de concurrencia -- ver dónde se
+            # adquirió, más arriba, y el docstring de liberar_operacion_pesada.
+            liberar_operacion_pesada()
 
     return StreamingResponse(_generar_respuesta(), media_type="application/json")
