@@ -13,6 +13,7 @@ import openpyxl
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 from app.core.date_parser import parse_date, format_display_date, DATE_FORMATS
+from app.core.desglose import lado_diff
 
 # Dos tolerancias separadas — antes era una sola (MONTO_TOLERANCE) usada para dos cosas
 # distintas, lo que hacía que no se pudiera ajustar una sin afectar la otra:
@@ -1453,8 +1454,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff_ventas(pos_rec),
-                "rg90": _lado_diff_ventas(None),
+                "libro": lado_diff(pos_rec),
+                "rg90": lado_diff(None),
                 "diferencia": "Anulada"
             }
         return {
@@ -1462,8 +1463,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
             "tipo_doc": pos_rec.get("tipo_doc", ""),
             "sistema": pos_rec["sistema"],
             "local": pos_rec["local"],
-            "libro": _lado_diff_ventas(pos_rec),
-            "rg90": _lado_diff_ventas(None),
+            "libro": lado_diff(pos_rec),
+            "rg90": lado_diff(None),
             "diferencia": "No llegó a la interfaz"
         }
     elif rg_rec and not pos_rec:
@@ -1472,8 +1473,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
             "tipo_doc": rg_rec.get("tipo_doc", ""),
             "sistema": rg_rec.get("sistema", "RG90"),
             "local": rg_rec.get("local", "Desconocido"),
-            "libro": _lado_diff_ventas(None),
-            "rg90": _lado_diff_ventas(rg_rec),
+            "libro": lado_diff(None),
+            "rg90": lado_diff(rg_rec),
             "diferencia": "No existe en el libro"
         }
     else:
@@ -1514,8 +1515,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff_ventas(pos_rec),
-                "rg90": _lado_diff_ventas(rg_rec),
+                "libro": lado_diff(pos_rec),
+                "rg90": lado_diff(rg_rec),
                 "diferencia": diferencia,
                 "diferencias_detalle": campo_diffs,
             }
@@ -1525,8 +1526,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff_ventas(pos_rec),
-                "rg90": _lado_diff_ventas(rg_rec),
+                "libro": lado_diff(pos_rec),
+                "rg90": lado_diff(rg_rec),
                 "diferencia": "Rechazada"
             }
         elif pos_rec["estado"].lower() == "anulada" or rg_rec.get("estado", "").lower() == "anulada":
@@ -1535,8 +1536,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff_ventas(pos_rec),
-                "rg90": _lado_diff_ventas(rg_rec),
+                "libro": lado_diff(pos_rec),
+                "rg90": lado_diff(rg_rec),
                 "diferencia": "Anulada"
             }
         else:
@@ -1551,8 +1552,8 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
                 "tipo_doc": pos_rec.get("tipo_doc", ""),
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff_ventas(pos_rec),
-                "rg90": _lado_diff_ventas(rg_rec),
+                "libro": lado_diff(pos_rec),
+                "rg90": lado_diff(rg_rec),
                 "diferencia": "Coincide"
             }
 
@@ -1588,17 +1589,3 @@ def reconcile_with_rg90_iter_pares(pares):
         yield _comparar_par(doc, pos_rec, rg_rec)
 
 
-def _lado_diff_ventas(rec: Dict[str, Any] | None) -> Dict[str, str]:
-    """Arma el desglose (gravada 10%/5%, IVA 10%/5%, exenta, total) de un lado de la
-    comparación (libro de ventas o RG90) — mismo criterio que _lado_diff() en
-    compras_engine.py. Vacío ('—') cuando ese lado no tiene el comprobante."""
-    if rec is None:
-        return {"gravada_10": "—", "iva_10": "—", "gravada_5": "—", "iva_5": "—", "exenta": "—", "total": "—"}
-    return {
-        "gravada_10": rec["gravadas"],
-        "iva_10": rec["iva"],
-        "gravada_5": rec.get("gravadas_5", "0,00"),
-        "iva_5": rec.get("iva_5", "0,00"),
-        "exenta": rec["exentas"],
-        "total": rec["total"],
-    }

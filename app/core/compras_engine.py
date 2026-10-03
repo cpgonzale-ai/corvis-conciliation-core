@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
+from app.core.desglose import lado_diff
 from app.core.engine import (
     DOC_PATTERN,
     _matches_profile_signature,
@@ -308,8 +309,8 @@ def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Di
             "proveedor": pos_rec["proveedor"],
             "sistema": pos_rec["sistema"],
             "local": pos_rec["local"],
-            "libro": _lado_diff(pos_rec),
-            "rg": _lado_diff(None),
+            "libro": lado_diff(pos_rec),
+            "rg": lado_diff(None),
             "diferencia": "No llegó a la interfaz",
         }
     elif rg_rec and not pos_rec:
@@ -319,8 +320,8 @@ def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Di
             "proveedor": rg_rec["proveedor"],
             "sistema": rg_rec.get("sistema", "RG"),
             "local": rg_rec.get("local", "Desconocido"),
-            "libro": _lado_diff(None),
-            "rg": _lado_diff(rg_rec),
+            "libro": lado_diff(None),
+            "rg": lado_diff(rg_rec),
             "diferencia": "No existe en el libro",
         }
     else:
@@ -346,8 +347,8 @@ def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Di
                 "proveedor": pos_rec["proveedor"],
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff(pos_rec),
-                "rg": _lado_diff(rg_rec),
+                "libro": lado_diff(pos_rec),
+                "rg": lado_diff(rg_rec),
                 "diferencia": diferencia,
                 "diferencias_detalle": campo_diffs,
             }
@@ -361,8 +362,8 @@ def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Di
                 "proveedor": pos_rec["proveedor"],
                 "sistema": pos_rec["sistema"],
                 "local": pos_rec["local"],
-                "libro": _lado_diff(pos_rec),
-                "rg": _lado_diff(rg_rec),
+                "libro": lado_diff(pos_rec),
+                "rg": lado_diff(rg_rec),
                 "diferencia": "Coincide",
             }
 
@@ -391,17 +392,3 @@ def reconcile_compras_with_rg_iter_pares(pares):
         yield _comparar_par_compras(clave, pos_rec, rg_rec)
 
 
-def _lado_diff(rec: Dict[str, Any] | None) -> Dict[str, str]:
-    """Arma el desglose (gravada 10%/5%, IVA 10%/5%, exenta, total) de un lado de la
-    comparación (libro propio o RG) tal como lo pide el Paso 3 — vacío ('—') cuando ese
-    lado no tiene el comprobante."""
-    if rec is None:
-        return {"gravada_10": "—", "iva_10": "—", "gravada_5": "—", "iva_5": "—", "exenta": "—", "total": "—"}
-    return {
-        "gravada_10": rec["gravadas"],
-        "iva_10": rec["iva"],
-        "gravada_5": rec["gravadas_5"],
-        "iva_5": rec["iva_5"],
-        "exenta": rec["exentas"],
-        "total": rec["total"],
-    }
