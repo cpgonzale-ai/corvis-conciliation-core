@@ -16,3 +16,6 @@ jobs:
       - run: pytest -q
         env:
           JWT_SECRET_KEY: ci-secret-no-produccion
+      # PYSEC-2026-1325 (ecdsa, Minerva): el ataque requiere firmar/generar claves ECDSA, y
+      # la app solo usa HS256 (ver app/core/security.py). Sin fix upstream. Riesgo aceptado.
+      - run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-1325
