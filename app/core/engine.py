@@ -11,7 +11,7 @@ from datetime import datetime, date
 import numpy as np
 import openpyxl
 import pandas as pd
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, NamedTuple
 from app.core.date_parser import parse_date, format_display_date, DATE_FORMATS
 from app.core.desglose import lado_diff
 
@@ -337,6 +337,21 @@ def _parse_fechas_vectorizado(fecha_s: pd.Series) -> Tuple[pd.Series, pd.Series]
     fecha_iso_s = resultado
     fecha_disp_s = fecha_iso_s.map(format_display_date)
     return fecha_iso_s, fecha_disp_s
+
+
+class _ContextoVentas(NamedTuple):
+    """Configuración fija del perfil para procesar las filas de un archivo de Ventas."""
+    profile: Dict
+    local_name: str
+    usa_clasificacion_tasa: bool
+    permitidos_norm: Optional[set]
+    notas_credito_por_tipo: set
+    serie_prefijos: List[str]
+
+
+def _absoluto_con_signo(valor: Any, negativo: bool) -> float:
+    """abs() del importe limpio, en negativo si corresponde (nota de crédito)."""
+    return -abs(clean_numeric(valor)) if negativo else abs(clean_numeric(valor))
 
 
 def _extract_corte(raw_row: List[Any], seccion: str) -> Optional[Dict[str, Any]]:
@@ -882,8 +897,8 @@ class IngestionEngine:
         # Ningún candidato produjo filas -- mismo resultado final que ingest_file cuando
         # ninguna hoja matchea (ahí devuelve rows=[]): acá, simplemente no se yield-ea nada.
 
-    def _process_dataframe(self, df: pd.DataFrame, profile: Dict, local_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        mappings = profile.get("column_mappings", [])
+    @staticmethod
+    def _extraer_columnas_perfil(df: pd.DataFrame, mappings: List[Dict]) -> pd.DataFrame:
         extracted_cols = {}
         # Mapa encabezado-normalizado -> encabezado real, para resolver un source_name del
         # perfil aunque el archivo tenga una cantidad distinta de espacios (ver
@@ -903,12 +918,11 @@ class IngestionEngine:
                 else:
                     c_real = columnas_por_encabezado_norm.get(_normalizar_encabezado(c_name))
                 extracted_cols[target] = df[c_real] if c_real is not None else pd.Series([None] * len(df))
+        return pd.DataFrame(extracted_cols)
 
-        records_df = pd.DataFrame(extracted_cols)
-        usa_clasificacion_tasa = "gravada_bruta" in records_df.columns
-        processed_rows: List[Dict[str, Any]] = []
-        cortes: List[Dict[str, Any]] = []
-
+    @staticmethod
+    def _actualizar_seccion(df: pd.DataFrame, idx: int, marker_col: Optional[int], credit_marker: str,
+                            factura_marker: str, seccion_actual: str) -> str:
         # Aloha no trae un campo "serie" por fila que identifique una nota de crédito (a
         # diferencia de Hiopos, que sí prefija "NC..." en su columna serie). En cambio, el
         # reporte separa las facturas de las notas de crédito con una fila marcadora ("1
@@ -918,25 +932,193 @@ class IngestionEngine:
         # fila: mientras no aparezca el marcador de crédito, las filas son facturas; a partir
         # de él (y hasta el próximo marcador de factura, si el archivo combina varios puntos
         # de expedición) son notas de crédito.
-        #
-        # El "documento" final NO lleva prefijo "NC" (así lo pide el libro limpio de
-        # referencia del cliente: la columna "Factura" trae la numeración cruda para ambos
-        # tipos); la clasificación factura/nota de crédito vive aparte, en "tipo_doc", y el
-        # control de correlatividad (detect_sequence_gaps) agrupa por local+serie+tipo_doc
-        # para no mezclar la numeración de facturas con la de notas de crédito.
+        if marker_col is None or marker_col >= len(df.columns):
+            return seccion_actual
+        raw_marker = df.iat[idx, marker_col]
+        if pd.notna(raw_marker):
+            marker_txt = str(raw_marker).strip().upper()
+            if credit_marker and marker_txt == credit_marker:
+                return "credito"
+            if marker_txt == factura_marker:
+                return "factura"
+        return seccion_actual
+
+    @staticmethod
+    def _serie_fiscal(serie_raw: Any, serie_prefijos: List[str]) -> Optional[str]:
+        """Devuelve la serie normalizada, o None si la fila debe descartarse por la serie."""
+        serie = str(serie_raw or "").strip()
+        serie_norm = fix_mojibake(serie)
+        if serie_norm.lower() in ["anulación", "anulacion"]:
+            return None
+        # Algunos locales de Hiopos anteponen un prefijo sin significado fiscal a la
+        # serie (ej. "FE" de "Factura Electrónica": FE045-001) que no forma parte del
+        # punto de expedición real y antes hacía que la serie no calzara con el patrón
+        # EEE-PPP, descartando comprobantes válidos por completo (confirmado sobre un
+        # caso real: 879-1.063 facturas reales de Fabric Sushi se perdían enteras por
+        # esto). El prefijo se declara en el perfil, no se hardcodea acá.
+        for prefijo in serie_prefijos:
+            if serie_norm.upper().startswith(prefijo.upper()):
+                serie_norm = serie_norm[len(prefijo):]
+                break
+        # Series internas no fiscales (ej. mermas, invitaciones/cortesías en Hiopos) no
+        # tienen el formato EEE-PPP de un punto de expedición real y deben descartarse.
+        if serie_norm and not SERIE_PATTERN.match(serie_norm.upper()):
+            return None
+        return serie_norm
+
+    @staticmethod
+    def _resolver_documento(serie_for_doc: str, raw_doc: Any) -> str:
+        # El "documento" en el libro limpio final (ver hoja "LIBRO VENTAS GLOBAL-Fact-NC"
+        # del archivo de referencia del cliente) es la numeración cruda, SIN prefijo "NC":
+        # facturas y notas de crédito conviven en la misma columna "Factura" y se
+        # distinguen únicamente por la columna "Tipo Doc.". El prefijo "NC" solo se usaba
+        # internamente antes; ahora se guarda es_credito y se arma el doc limpio.
+        if serie_for_doc and not str(raw_doc).startswith(serie_for_doc):
+            try:
+                seq_int = int(float(str(raw_doc)))
+                return f"{serie_for_doc}-{seq_int:07d}"
+            except ValueError:
+                return normalize_invoice_number(f"{serie_for_doc}-{raw_doc}")
+        return normalize_invoice_number(raw_doc)
+
+    @staticmethod
+    def _montos_tasas(listas: Dict[str, list], idx: int, usa_clasificacion_tasa: bool,
+                      es_credito: bool, total: float) -> Tuple[float, float, float, float, float]:
+        """Devuelve (gravada, iva, gravada_5, iva_5, exenta) con el signo ya aplicado."""
+        if usa_clasificacion_tasa:
+            gravada_bruta = _absoluto_con_signo(listas["gravada_bruta"][idx], es_credito)
+            iva_bruta = _absoluto_con_signo(listas["iva_bruta"][idx], es_credito)
+            return classify_tax_rate(gravada_bruta, iva_bruta)
+        signo = -1 if es_credito else 1
+        gravada = signo * abs(clean_numeric(listas["gravada_10"][idx]))
+        iva = signo * abs(clean_numeric(listas["iva_10"][idx]))
+        gravada_5 = signo * abs(clean_numeric(listas["gravada_5"][idx]))
+        iva_5 = signo * abs(clean_numeric(listas["iva_5"][idx]))
+        exenta = signo * abs(clean_numeric(listas["exenta"][idx]))
+        if total != 0 and gravada == 0 and gravada_5 == 0 and exenta == 0:
+            gravada = signo * round(abs(total) / 1.1, 0)
+            iva = total - gravada
+        return gravada, iva, gravada_5, iva_5, exenta
+
+    @staticmethod
+    def _estado_fila(estado_raw: Any, total: float) -> str:
+        estado = str(estado_raw or "Válida").strip()
+        if estado.upper() == "E":
+            return "Válida"
+        if estado.upper() == "A":
+            return "Anulada"
+        if total == 0 and estado.lower() != "anulada":
+            return "Anulada"
+        return estado
+
+    def _fila_venta(self, idx: int, listas: Dict[str, list], ctx: "_ContextoVentas", seccion: str) -> Optional[Dict[str, Any]]:
+        """Procesa una fila del reporte. Devuelve None si la fila se descarta."""
+        # "Tipo de Comprobante"/"Tipo Documento" crudo, tal como viene del archivo — se
+        # captura siempre (no solo cuando hay lista de permitidos) porque también se usa
+        # para armar el tipo_doc que se muestra en la grilla, en vez de forzar todo a
+        # Factura/Nota de Crédito.
+        tipo_doc_raw = fix_mojibake(str(listas["tipo_documento"][idx] or "").strip())
+
+        # Filtro explícito por tipo de comprobante, declarado por perfil: Hiopos solo
+        # procesa factura de venta, factura de venta simplificada, abono factura de venta
+        # y abono factura de venta simplificada (descarta pedido/albarán/factura de
+        # compra, merma, invitación, recuento, filas vacías); la RG90 y el Formato
+        # Universal listan los tipos de comprobante oficiales del SET que aplican a
+        # Ventas. El resto se descarta acá directamente, sin depender únicamente de que
+        # su serie calce con el patrón EEE-PPP.
+        if ctx.permitidos_norm is not None and _normalizar_tipo(tipo_doc_raw) not in ctx.permitidos_norm:
+            return None
+
+        serie_norm = self._serie_fiscal(listas["serie"][idx], ctx.serie_prefijos)
+        if serie_norm is None:
+            return None
+
+        es_credito = seccion == "credito"
+        serie_for_doc = serie_norm
+        if serie_norm.upper().startswith("NC"):
+            es_credito = True
+            serie_for_doc = serie_norm[2:]
+
+        # Tercera forma de detectar nota de crédito, para perfiles que no tienen ni
+        # marcador de sección (Aloha) ni prefijo "NC" en la serie (Hiopos) — el Formato
+        # Universal (Minuta) y la RG90 traen un campo "Tipo" por fila ("FACTURA" / "NOTA
+        # DE CREDITO") en vez de eso. Los demás tipos permitidos (Nota de Débito, Boleta de
+        # Venta, Ticket Máquina Registradora, etc.) NO entran acá — quedan con signo
+        # positivo, igual que una Factura.
+        if ctx.notas_credito_por_tipo and _normalizar_tipo(tipo_doc_raw) in ctx.notas_credito_por_tipo:
+            es_credito = True
+
+        doc = self._resolver_documento(serie_for_doc, listas["numero_comprobante"][idx])
+        if not doc or not DOC_PATTERN.match(doc):
+            return None
+
+        fecha_iso = parse_date(listas["fecha"][idx])
+        fecha_disp = format_display_date(fecha_iso)
+
+        # Convención del libro propio (no de la comparación contra RG90, que sigue en
+        # valor absoluto en reconcile_with_rg90): una nota de crédito resta de la venta,
+        # así que sus montos quedan en negativo — es lo que permite que "Total Neto" dé la
+        # venta neta real, tal como lo imprime el cliente en su Excel de referencia.
+        total = _absoluto_con_signo(listas["total"][idx], es_credito)
+        gravada, iva, gravada_5, iva_5, exenta = self._montos_tasas(listas, idx, ctx.usa_clasificacion_tasa, es_credito, total)
+
+        ruc = str(listas["ruc"][idx] or "").strip()
+        if not ruc or ruc.upper() in ["NAN", "NONE", "NULL", "X"]:
+            ruc = "X"
+
+        nombre = fix_mojibake(str(listas["nombre_cliente"][idx] or "").strip())
+        if not nombre or nombre.upper() in ["NAN", "NONE", "NULL", "SIN NOMBRE"]:
+            nombre = "SIN NOMBRE"
+
+        estado = self._estado_fila(listas["estado"][idx], total)
+
+        return {
+            "doc": doc,
+            "sistema": ctx.profile["name"],
+            "local": ctx.local_name,
+            "fecha": fecha_disp,
+            "fecha_iso": fecha_iso,
+            "ruc": ruc,
+            "nombre": nombre,
+            "gravadas": fmt_gs(gravada),
+            "iva": fmt_gs(iva),
+            "gravadas_5": fmt_gs(gravada_5),
+            "iva_5": fmt_gs(iva_5),
+            "exentas": fmt_gs(exenta),
+            "total": fmt_gs(total),
+            "gravadas_num": gravada,
+            "iva_num": iva,
+            "gravadas_5_num": gravada_5,
+            "iva_5_num": iva_5,
+            "exentas_num": exenta,
+            "total_num": total,
+            "estado": estado,
+            # Se muestra el tipo de comprobante tal como vino del archivo (Boleta de
+            # Venta, Nota de Débito, Ticket Máquina Registradora, etc. — ver Tipos de
+            # Comprobante del SET) en vez de forzar todo a Factura/Nota de Crédito;
+            # Aloha no trae este campo por fila (usa el marcador de sección), así que
+            # ahí se sigue infiriendo por es_credito.
+            "tipo_doc": tipo_doc_display(tipo_doc_raw, es_credito),
+        }
+
+    def _process_dataframe(self, df: pd.DataFrame, profile: Dict, local_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        records_df = self._extraer_columnas_perfil(df, profile.get("column_mappings", []))
+        usa_clasificacion_tasa = "gravada_bruta" in records_df.columns
+        processed_rows: List[Dict[str, Any]] = []
+        cortes: List[Dict[str, Any]] = []
+
+        # Marcadores de sección de Aloha: ver _actualizar_seccion.
         marker_col = profile.get("section_marker_col")
         credit_marker = str(profile.get("section_credit_marker", "")).strip().upper()
         factura_marker = str(profile.get("section_factura_marker", "FACTURA")).strip().upper()
         current_section = "factura"
 
         # Normalizados UNA sola vez por archivo, no por fila — con un archivo real de
-        # 65.535 filas, recalcular estos dos sets en cada iteración (como quedó al agregar
-        # el filtro de tipos de comprobante) representaba ~1 millón de llamadas de más a
-        # _normalizar_tipo y cerca de un tercio del tiempo total de procesamiento.
+        # 65.535 filas, recalcular estos dos sets en cada iteración representaba ~1 millón
+        # de llamadas de más a _normalizar_tipo y cerca de un tercio del tiempo total.
         tipos_permitidos = profile.get("tipo_documento_permitidos")
         permitidos_norm = {_normalizar_tipo(t) for t in tipos_permitidos} if tipos_permitidos is not None else None
         notas_credito_por_tipo = {_normalizar_tipo(t) for t in profile.get("tipo_documento_notas_credito", [])}
-        serie_prefijos = profile.get("serie_prefijos_no_fiscales", [])
 
         n = len(records_df)
 
@@ -946,207 +1128,42 @@ class IngestionEngine:
         if marker_col is None:
             return self._process_dataframe_vectorizado(
                 records_df, profile, local_name, usa_clasificacion_tasa,
-                permitidos_norm, notas_credito_por_tipo, serie_prefijos,
+                permitidos_norm, notas_credito_por_tipo, profile.get("serie_prefijos_no_fiscales", []),
             )
 
-        def _col(name: str) -> list:
-            return records_df[name].tolist() if name in records_df.columns else [None] * n
-
         # Se extrae cada columna UNA sola vez como lista nativa de Python (reemplaza
-        # records_df.iterrows()) — medido en la auditoría de performance
-        # (/auditoria/05-performance.md): sobre un archivo real de 65.535 filas, iterrows()
-        # reconstruye una Series pandas (con coerción de tipo heterogénea) en cada una de
-        # esas 65.535 vueltas solo para poder leer r.get(...), y eso solo ya representaba
-        # ~46% del tiempo total de ingesta de ese archivo. Iterar sobre listas nativas con
-        # índice numérico mantiene EXACTAMENTE la misma lógica fila por fila de abajo (mismos
-        # "continue", mismo orden de chequeos, mismas llamadas a las mismas funciones) — no
-        # es una reescritura vectorizada de la lógica en sí (eso quedó fuera de alcance por
-        # el riesgo de alterar el resultado del state machine de Aloha, ver marker_col más
-        # abajo), solo se saca el costo de reconstruir una Series por fila.
-        tipo_documento_l = _col("tipo_documento")
-        serie_l = _col("serie")
-        numero_comprobante_l = _col("numero_comprobante")
-        fecha_l = _col("fecha")
-        total_l = _col("total")
-        gravada_bruta_l = _col("gravada_bruta")
-        iva_bruta_l = _col("iva_bruta")
-        gravada_10_l = _col("gravada_10")
-        iva_10_l = _col("iva_10")
-        gravada_5_l = _col("gravada_5")
-        iva_5_l = _col("iva_5")
-        exenta_l = _col("exenta")
-        ruc_l = _col("ruc")
-        nombre_cliente_l = _col("nombre_cliente")
-        estado_l = _col("estado")
+        # records_df.iterrows()) — ver /auditoria/05-performance.md: iterrows() reconstruye
+        # una Series pandas por fila solo para leer r.get(...), y eso era ~46% del tiempo de
+        # ingesta de un archivo real de 65.535 filas.
+        listas = {
+            campo: (records_df[campo].tolist() if campo in records_df.columns else [None] * n)
+            for campo in (
+                "tipo_documento", "serie", "numero_comprobante", "fecha", "total",
+                "gravada_bruta", "iva_bruta", "gravada_10", "iva_10", "gravada_5", "iva_5",
+                "exenta", "ruc", "nombre_cliente", "estado",
+            )
+        }
+        ctx = _ContextoVentas(
+            profile=profile,
+            local_name=local_name,
+            usa_clasificacion_tasa=usa_clasificacion_tasa,
+            permitidos_norm=permitidos_norm,
+            notas_credito_por_tipo=notas_credito_por_tipo,
+            serie_prefijos=profile.get("serie_prefijos_no_fiscales", []),
+        )
 
         for idx in range(n):
-            if marker_col is not None and marker_col < len(df.columns):
-                raw_marker = df.iat[idx, marker_col]
-                if pd.notna(raw_marker):
-                    marker_txt = str(raw_marker).strip().upper()
-                    if credit_marker and marker_txt == credit_marker:
-                        current_section = "credito"
-                    elif marker_txt == factura_marker:
-                        current_section = "factura"
-
+            current_section = self._actualizar_seccion(
+                df, idx, marker_col, credit_marker, factura_marker, current_section,
+            )
             # Los cortes/subtotales ("Serie: 001 Totales", etc.) son un artefacto propio del
-            # formato de Aloha (imprime esas filas al cierre de cada bloque) — para el resto
-            # de los perfiles esto es trabajo desperdiciado, y df.iloc[idx] (acceso posicional
-            # fila a fila) es particularmente lento dentro de un loop de miles de filas. Se
-            # deja intacto (sin optimizar): solo corre para perfiles con marker_col (Aloha),
-            # que no es el camino que domina el tiempo total (ver auditoría de performance).
-            if marker_col is not None:
-                corte = _extract_corte(df.iloc[idx].tolist(), current_section)
-                if corte:
-                    cortes.append(corte)
-
-            # "Tipo de Comprobante"/"Tipo Documento" crudo, tal como viene del archivo —
-            # se captura siempre (no solo cuando hay lista de permitidos) porque más abajo
-            # también se usa para armar el tipo_doc que se muestra en la grilla (ver el
-            # cierre de este for), en vez de forzar todo a Factura/Nota de Crédito.
-            tipo_doc_raw = fix_mojibake(str(tipo_documento_l[idx] or "").strip())
-
-            # Filtro explícito por tipo de comprobante, declarado por perfil: Hiopos solo
-            # procesa factura de venta, factura de venta simplificada, abono factura de venta
-            # y abono factura de venta simplificada (descarta pedido/albarán/factura de
-            # compra, merma, invitación, recuento, filas vacías); la RG90 y el Formato
-            # Universal listan los tipos de comprobante oficiales del SET que aplican a
-            # Ventas (Factura, Nota de Crédito, Nota de Débito, Boleta de Venta, Ticket
-            # Máquina Registradora, etc. — ver perfiles). El resto se descarta acá
-            # directamente, sin depender únicamente de que su serie calce con el patrón
-            # EEE-PPP.
-            if permitidos_norm is not None and _normalizar_tipo(tipo_doc_raw) not in permitidos_norm:
-                continue
-
-            serie = str(serie_l[idx] or "").strip()
-            serie_norm = fix_mojibake(serie)
-            if serie_norm.lower() in ["anulación", "anulacion"]:
-                continue
-
-            # Algunos locales de Hiopos anteponen un prefijo sin significado fiscal a la
-            # serie (ej. "FE" de "Factura Electrónica": FE045-001) que no forma parte del
-            # punto de expedición real y antes hacía que la serie no calzara con el patrón
-            # EEE-PPP, descartando comprobantes válidos por completo (confirmado sobre un
-            # caso real: 879-1.063 facturas reales de Fabric Sushi se perdían enteras por
-            # esto). El prefijo se declara en el perfil, no se hardcodea acá.
-            for prefijo in serie_prefijos:
-                if serie_norm.upper().startswith(prefijo.upper()):
-                    serie_norm = serie_norm[len(prefijo):]
-                    break
-
-            # Series internas no fiscales (ej. mermas, invitaciones/cortesías en Hiopos) no
-            # tienen el formato EEE-PPP de un punto de expedición real y deben descartarse.
-            if serie_norm and not SERIE_PATTERN.match(serie_norm.upper()):
-                continue
-
-            # El "documento" en el libro limpio final (ver hoja "LIBRO VENTAS GLOBAL-Fact-NC"
-            # del archivo de referencia del cliente) es la numeración cruda, SIN prefijo "NC":
-            # facturas y notas de crédito conviven en la misma columna "Factura" y se
-            # distinguen únicamente por la columna "Tipo Doc.". El prefijo "NC" solo se usaba
-            # internamente antes; ahora se guarda es_credito y se arma el doc limpio.
-            es_credito = current_section == "credito"
-            serie_for_doc = serie_norm
-            if serie_norm.upper().startswith("NC"):
-                es_credito = True
-                serie_for_doc = serie_norm[2:]
-
-            # Tercera forma de detectar nota de crédito, para perfiles que no tienen ni
-            # marcador de sección (Aloha) ni prefijo "NC" en la serie (Hiopos) — el Formato
-            # Universal (Minuta) y la RG90 traen un campo "Tipo" por fila ("FACTURA" / "NOTA
-            # DE CREDITO") en vez de eso. El monto ya viene en negativo en el archivo de
-            # origen para estas filas (Universal), así que acá solo hace falta marcar
-            # es_credito; el signo final se recalcula igual (abs + signo) más abajo. Los
-            # demás tipos permitidos (Nota de Débito, Boleta de Venta, Ticket Máquina
-            # Registradora, etc.) NO entran acá — quedan con signo positivo, igual que una
-            # Factura.
-            if notas_credito_por_tipo and _normalizar_tipo(tipo_doc_raw) in notas_credito_por_tipo:
-                es_credito = True
-
-            raw_doc = numero_comprobante_l[idx]
-            if serie_for_doc and not str(raw_doc).startswith(serie_for_doc):
-                try:
-                    seq_int = int(float(str(raw_doc)))
-                    doc = f"{serie_for_doc}-{seq_int:07d}"
-                except ValueError:
-                    doc = normalize_invoice_number(f"{serie_for_doc}-{raw_doc}")
-            else:
-                doc = normalize_invoice_number(raw_doc)
-
-            if not doc:
-                continue
-
-            if not DOC_PATTERN.match(doc):
-                continue
-
-            fecha_iso = parse_date(fecha_l[idx])
-            fecha_disp = format_display_date(fecha_iso)
-
-            # Convención del libro propio (no de la comparación contra RG90, que sigue en
-            # valor absoluto en reconcile_with_rg90): una nota de crédito resta de la venta,
-            # así que sus montos quedan en negativo — es lo que permite que "Total Neto" dé la
-            # venta neta real, tal como lo imprime el cliente en su Excel de referencia.
-            total = -abs(clean_numeric(total_l[idx])) if es_credito else abs(clean_numeric(total_l[idx]))
-
-            if usa_clasificacion_tasa:
-                gravada_bruta = -abs(clean_numeric(gravada_bruta_l[idx])) if es_credito else abs(clean_numeric(gravada_bruta_l[idx]))
-                iva_bruta = -abs(clean_numeric(iva_bruta_l[idx])) if es_credito else abs(clean_numeric(iva_bruta_l[idx]))
-                gravada, iva, gravada_5, iva_5, exenta = classify_tax_rate(gravada_bruta, iva_bruta)
-            else:
-                signo = -1 if es_credito else 1
-                gravada = signo * abs(clean_numeric(gravada_10_l[idx]))
-                iva = signo * abs(clean_numeric(iva_10_l[idx]))
-                gravada_5 = signo * abs(clean_numeric(gravada_5_l[idx]))
-                iva_5 = signo * abs(clean_numeric(iva_5_l[idx]))
-                exenta = signo * abs(clean_numeric(exenta_l[idx]))
-
-                if total != 0 and gravada == 0 and gravada_5 == 0 and exenta == 0:
-                    gravada = signo * round(abs(total) / 1.1, 0)
-                    iva = total - gravada
-
-            ruc = str(ruc_l[idx] or "").strip()
-            if not ruc or ruc.upper() in ["NAN", "NONE", "NULL", "X"]:
-                ruc = "X"
-
-            nombre = fix_mojibake(str(nombre_cliente_l[idx] or "").strip())
-            if not nombre or nombre.upper() in ["NAN", "NONE", "NULL", "SIN NOMBRE"]:
-                nombre = "SIN NOMBRE"
-
-            estado = str(estado_l[idx] or "Válida").strip()
-            if estado.upper() == "E":
-                estado = "Válida"
-            elif estado.upper() == "A":
-                estado = "Anulada"
-            elif total == 0 and estado.lower() != "anulada":
-                estado = "Anulada"
-
-            processed_rows.append({
-                "doc": doc,
-                "sistema": profile["name"],
-                "local": local_name,
-                "fecha": fecha_disp,
-                "fecha_iso": fecha_iso,
-                "ruc": ruc,
-                "nombre": nombre,
-                "gravadas": fmt_gs(gravada),
-                "iva": fmt_gs(iva),
-                "gravadas_5": fmt_gs(gravada_5),
-                "iva_5": fmt_gs(iva_5),
-                "exentas": fmt_gs(exenta),
-                "total": fmt_gs(total),
-                "gravadas_num": gravada,
-                "iva_num": iva,
-                "gravadas_5_num": gravada_5,
-                "iva_5_num": iva_5,
-                "exentas_num": exenta,
-                "total_num": total,
-                "estado": estado,
-                # Se muestra el tipo de comprobante tal como vino del archivo (Boleta de
-                # Venta, Nota de Débito, Ticket Máquina Registradora, etc. — ver Tipos de
-                # Comprobante del SET) en vez de forzar todo a Factura/Nota de Crédito;
-                # Aloha no trae este campo por fila (usa el marcador de sección), así que
-                # ahí se sigue infiriendo por es_credito.
-                "tipo_doc": tipo_doc_display(tipo_doc_raw, es_credito),
-            })
+            # formato de Aloha — solo corre para perfiles con marker_col (Aloha).
+            corte = _extract_corte(df.iloc[idx].tolist(), current_section)
+            if corte:
+                cortes.append(corte)
+            fila = self._fila_venta(idx, listas, ctx, current_section)
+            if fila is not None:
+                processed_rows.append(fila)
 
         return processed_rows, cortes
 
