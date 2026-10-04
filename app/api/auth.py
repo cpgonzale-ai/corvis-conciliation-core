@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app.core import permisos_cache
+from app.core import login_limiter, permisos_cache
 from app.core.audit import log_evento as _log_evento
 from app.core.deps import get_current_user, require_permission
 from app.core.security import create_access_token, hash_password, verify_password
@@ -19,10 +19,18 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     # El usuario para loguearse es el número de documento (CU-01), no el email — el campo
     # se sigue llamando "username" porque así lo pide el formato estándar OAuth2 del form.
-    usuario = db.query(Usuario).filter(Usuario.nro_documento == form_data.username.strip()).first()
+    documento = form_data.username.strip()
+    ip = request.client.host if request.client else "desconocida"
+    if login_limiter.bloqueado(f"doc:{documento}") or login_limiter.bloqueado(f"ip:{ip}"):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Demasiados intentos fallidos. Esperá unos minutos e intentá de nuevo.")
+
+    usuario = db.query(Usuario).filter(Usuario.nro_documento == documento).first()
     if not usuario or not usuario.activo or not verify_password(form_data.password, usuario.password_hash):
+        login_limiter.registrar_fallo(f"doc:{documento}")
+        login_limiter.registrar_fallo(f"ip:{ip}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
 
+    login_limiter.limpiar(f"doc:{documento}")
     token = create_access_token(subject=usuario.nro_documento, rol=usuario.rol)
     _log_evento(db, usuario.id, "login", request)
     return TokenResponse(access_token=token, rol=usuario.rol)
