@@ -49,7 +49,7 @@ def parse_date(value: Union[str, int, float, datetime, date]) -> Optional[str]:
                 dt_tuple = xlrd.xldate_as_tuple(value, 0)
                 dt = datetime(*dt_tuple[:3])
                 return dt.strftime("%Y-%m-%d")
-        except Exception:
+        except (xlrd.xldate.XLDateError, ValueError, OverflowError):
             pass
 
     s_val = str(value).strip()
@@ -93,5 +93,5 @@ def format_display_date(iso_date_str: Optional[str]) -> str:
     try:
         dt = datetime.strptime(iso_date_str, "%Y-%m-%d")
         return dt.strftime("%d/%m/%Y")
-    except Exception:
+    except (ValueError, TypeError):
         return iso_date_str

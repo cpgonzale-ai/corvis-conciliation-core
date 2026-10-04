@@ -244,7 +244,8 @@ async def _ingest_files_impl(
             for c in cortes:
                 all_cortes.append({**c, "archivo": file.filename, "local": local_name})
 
-    gaps = detect_sequence_gaps(all_rows)
+    # Corre en el executor: es síncrono y con archivos grandes bloqueaba el event loop.
+    gaps = await asyncio.get_running_loop().run_in_executor(None, detect_sequence_gaps, all_rows)
 
     # "mixto" (ver el comentario del campo en models.py) cuando el lote combina archivos de
     # más de un sistema — posible ahora que ya no hace falta agruparlos de antemano.
@@ -566,7 +567,7 @@ async def reconcile(
         # detector que ya usa /api/ingest sobre el libro propio, para el Paso 3 (Adjuntar
         # RG90). Sin cambios en detect_sequence_gaps -- solo recibe una versión más chica
         # de cada fila (ver comentario de gaps_input arriba).
-        rg90_gaps = detect_sequence_gaps(rg90_gaps_input)
+        rg90_gaps = await asyncio.get_running_loop().run_in_executor(None, detect_sequence_gaps, rg90_gaps_input)
         del rg90_gaps_input
         gc.collect()
     except HTTPException:

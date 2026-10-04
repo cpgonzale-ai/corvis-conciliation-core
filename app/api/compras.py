@@ -291,7 +291,7 @@ async def reconcile_compras(
         # ver detect_sequence_gaps), no contra el libro propio: acá no hay control de
         # correlatividad del libro propio, no es responsabilidad del comprador que un
         # proveedor salte numeración (ver docstring de ComprasEngine).
-        rg_gaps = detect_sequence_gaps(rg_rows)
+        rg_gaps = await asyncio.get_running_loop().run_in_executor(None, detect_sequence_gaps, rg_rows)
         rg_total_rows = len(rg_rows)
         del rg_rows
         gc.collect()
