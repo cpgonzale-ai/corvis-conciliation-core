@@ -1,0 +1,51 @@
+{
+  "cortes": [],
+  "filas": [
+    {
+      "doc": "045-001-0000123",
+      "estado": "Válida",
+      "exentas": "0,00",
+      "exentas_num": 0.0,
+      "fecha": "02/05/2026",
+      "fecha_iso": "2026-05-02",
+      "gravadas": "90.909,09",
+      "gravadas_5": "0,00",
+      "gravadas_5_num": 0.0,
+      "gravadas_num": 90909.09,
+      "iva": "9.090,91",
+      "iva_5": "0,00",
+      "iva_5_num": 0.0,
+      "iva_num": 9090.91,
+      "local": "Local Sintetico",
+      "nombre": "Cliente Sintetico Uno",
+      "ruc": "80012345-6",
+      "sistema": "Hiopos POS — Libro Ventas",
+      "tipo_doc": "Factura",
+      "total": "100.000,00",
+      "total_num": 100000.0
+    },
+    {
+      "doc": "001-001-0000005",
+      "estado": "Válida",
+      "exentas": "0,00",
+      "exentas_num": 0.0,
+      "fecha": "03/05/2026",
+      "fecha_iso": "2026-05-03",
+      "gravadas": "4.545,45",
+      "gravadas_5": "0,00",
+      "gravadas_5_num": 0.0,
+      "gravadas_num": 4545.45,
+      "iva": "454,55",
+      "iva_5": "0,00",
+      "iva_5_num": 0.0,
+      "iva_num": 454.55,
+      "local": "Local Sintetico",
+      "nombre": "Cliente Sintetico Dos",
+      "ruc": "80099999-1",
+      "sistema": "Hiopos POS — Libro Ventas",
+      "tipo_doc": "Factura",
+      "total": "5.000,00",
+      "total_num": 5000.0
+    }
+  ]
+}
