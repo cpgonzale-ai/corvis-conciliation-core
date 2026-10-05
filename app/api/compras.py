@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from app.core.audit import log_evento as _log_evento
 from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg_iter_pares
 from app.core.concurrencia import adquirir_operacion_pesada, liberar_operacion_pesada
-from app.core.engine import detect_sequence_gaps
+from app.core.engine import detect_sequence_gaps, total_faltantes
 from app.core.deps import get_current_user
 from app.core.sqlite_cruce import armar_error_duplicados, insertar_lote_diagnosticando_duplicados, nueva_sqlite_temporal
 from app.core.uploads import guardar_archivo_seguro
@@ -406,7 +406,7 @@ async def reconcile_compras(
                 total_coinciden=counts["coinciden"],
                 total_no_en_rg90=counts["no_en_rg"],
                 total_no_en_libro=counts["no_en_libro"],
-                total_saltos=len(rg_gaps),
+                total_saltos=total_faltantes(rg_gaps),
             ))
             db.commit()
 
@@ -417,7 +417,7 @@ async def reconcile_compras(
                 "no_en_libro": counts["no_en_libro"],
                 "diferencia_importe": counts["diferencia_importe"],
                 "diferencias_tasas": counts["diferencias_tasas"],
-                "saltos_rg": len(rg_gaps),
+                "saltos_rg": total_faltantes(rg_gaps),
             })
 
             yield ', "lote_id": %d}' % lote.id

@@ -30,7 +30,7 @@ from app.core.audit import log_evento as _log_evento
 from app.core.concurrencia import adquirir_operacion_pesada, liberar_operacion_pesada
 from app.core.config import settings
 from app.core.deps import get_current_user
-from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90_iter_pares
+from app.core.engine import IngestionEngine, detect_sequence_gaps, reconcile_with_rg90_iter_pares, total_faltantes
 from app.core.middleware import GzipRequestDecompressionMiddleware
 from app.core.sqlite_cruce import (
     armar_error_duplicados as _armar_error_duplicados,
@@ -257,7 +257,7 @@ async def _ingest_files_impl(
         tipo_libro=tipo_libro,
         sistema_origen=sistema_origen,
         cantidad_comprobantes=len(all_rows),
-        cantidad_saltos=len(gaps),
+        cantidad_saltos=total_faltantes(gaps),
         estado="cargado",
     )
     db.add(lote)
@@ -269,13 +269,14 @@ async def _ingest_files_impl(
     db.refresh(lote)
 
     _log_evento(db, usuario.id, "carga_archivo", request, lote_id=lote.id, detalle={"archivos": [f.filename for f in files], "sistema": sistema_origen})
-    _log_evento(db, usuario.id, "conversion", request, lote_id=lote.id, detalle={"cantidad_comprobantes": len(all_rows), "cantidad_saltos": len(gaps)})
+    _log_evento(db, usuario.id, "conversion", request, lote_id=lote.id, detalle={"cantidad_comprobantes": len(all_rows), "cantidad_saltos": total_faltantes(gaps)})
 
     return {
         "success": True,
         "lote_id": lote.id,
         "total_rows": len(all_rows),
         "gaps_count": len(gaps),
+        "faltantes_total": total_faltantes(gaps),
         "rows": all_rows,
         "gaps": gaps,
         "cortes": all_cortes,
@@ -591,7 +592,7 @@ async def reconcile(
         # ERR_EMPTY_RESPONSE de antes, pero con el motivo real en el log del servidor en
         # vez de un worker muerto sin rastro.
         try:
-            counts = {"coinciden": 0, "no_en_rg90": 0, "no_en_libro": 0, "saltos": 0, "anuladas": 0, "diferencia_importe": 0, "diferencias_tasas": 0}
+            counts = {"coinciden": 0, "no_en_rg90": 0, "no_en_libro": 0, "saltos": total_faltantes(rg90_gaps), "anuladas": 0, "diferencia_importe": 0, "diferencias_tasas": 0}
 
             # Yield-ear pieza por pieza (una por fila) funciona para el objetivo de memoria,
             # pero cada yield de un StreamingResponse termina en un write() de socket propio

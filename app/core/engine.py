@@ -1362,6 +1362,13 @@ class IngestionEngine:
         return processed_rows, cortes
 
 
+def total_faltantes(gaps: List[Dict[str, Any]]) -> int:
+    """Cantidad de números de comprobante faltantes: suma de 'cantidad' de cada salto.
+    Un tramo puede faltar 1 número o cientos; contar tramos subestima lo que el usuario ve
+    en la columna 'Faltantes'."""
+    return sum(int(g.get("cantidad", 0)) for g in gaps)
+
+
 def detect_sequence_gaps(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Detects missing document numbers per local / establecimiento / tipo de documento.
 
