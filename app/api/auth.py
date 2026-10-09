@@ -109,6 +109,10 @@ def editar_usuario(
         if db.query(Usuario).filter(Usuario.nro_documento == datos.nro_documento, Usuario.id != usuario_id).first():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese número de documento ya está registrado")
         objetivo.nro_documento = datos.nro_documento
+    if datos.email is not None and datos.email != objetivo.email:
+        if db.query(Usuario).filter(Usuario.email == datos.email, Usuario.id != usuario_id).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El email ya está registrado")
+        objetivo.email = datos.email
     if datos.nombre is not None:
         objetivo.nombre = datos.nombre
     if datos.activo is not None:

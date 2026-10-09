@@ -35,6 +35,7 @@ class UsuarioCreate(BaseModel):
 class UsuarioUpdate(BaseModel):
     nombre: str | None = Field(default=None, min_length=1, max_length=150)
     nro_documento: str | None = Field(default=None, min_length=1, max_length=20)
+    email: EmailStr | None = None
     rol_id: int | None = None
     activo: bool | None = None
     password: str | None = Field(default=None, min_length=8)
