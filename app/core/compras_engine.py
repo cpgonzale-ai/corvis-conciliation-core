@@ -316,6 +316,14 @@ class ComprasEngine:
 
 
 def _comparar_par_compras(clave: Any, pos_rec: Dict[str, Any] | None, rg_rec: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Resultado de _comparar_par_compras_sin_fecha + la fecha del comprobante (la del
+    libro; la de la RG si solo existe allí) para la grilla de resultado."""
+    res = _comparar_par_compras_sin_fecha(clave, pos_rec, rg_rec)
+    res["fecha"] = str((pos_rec or rg_rec or {}).get("fecha") or "")
+    return res
+
+
+def _comparar_par_compras_sin_fecha(clave: Any, pos_rec: Dict[str, Any] | None, rg_rec: Dict[str, Any] | None) -> Dict[str, Any]:
     """La lógica de negocio de la comparación, para UN comprobante a la vez -- extraída tal
     cual del loop que tenía reconcile_compras_with_rg (sin cambiar ninguna rama ni regla),
     para poder alimentarla tanto desde los dos mapas completos en memoria (esa función,

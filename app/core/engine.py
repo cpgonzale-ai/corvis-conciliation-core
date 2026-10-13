@@ -1459,6 +1459,14 @@ def reconcile_with_rg90(libro_rows: List[Dict[str, Any]], rg90_rows: List[Dict[s
 
 
 def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resultado de _comparar_par_sin_fecha + la fecha del comprobante (la del libro; la de
+    la RG90 si solo existe allí) para la grilla de resultado."""
+    res = _comparar_par_sin_fecha(doc, pos_rec, rg_rec)
+    res["fecha"] = str((pos_rec or rg_rec or {}).get("fecha") or "")
+    return res
+
+
+def _comparar_par_sin_fecha(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """La lógica de negocio de la comparación, para UN comprobante a la vez — exactamente
     las mismas ramas y criterios que tenía reconcile_with_rg90 desde siempre (ver el
     historial de esa función: control por campo, Anulada, Rechazada, etc.), ahora aisladas

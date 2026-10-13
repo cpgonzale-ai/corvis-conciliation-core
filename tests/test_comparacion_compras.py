@@ -96,3 +96,11 @@ def test_duplicados_en_filas_cuenta_por_tipo_numero_y_ruc():
         "cantidad": 2, "origen": "Libro",
     }]
     assert duplicados_en_filas([f("A", 1.0), f("B", 1.0)], "Libro") == []
+
+
+def test_el_resultado_incluye_la_fecha_del_libro_o_la_de_la_rg_si_solo_esta_alli():
+    libro = {**f("001-001-0000001", 100.0), "fecha": "05/10/2026"}
+    rg = {**f("001-001-0000002", 100.0), "fecha": "06/10/2026"}
+    res = {d["doc"]: d for d in reconcile_compras_with_rg([libro], [rg])}
+    assert res["001-001-0000001"]["fecha"] == "05/10/2026"
+    assert res["001-001-0000002"]["fecha"] == "06/10/2026"
