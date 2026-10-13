@@ -200,6 +200,12 @@ def fix_mojibake(s: str) -> str:
     return repaired if repaired != s else s
 
 
+def _quitar_asteriscos_serie(serie: str) -> str:
+    """Hiopos a veces antepone asteriscos a la serie ("**001-002"); no son parte de la serie
+    real y, sin quitarlos, el comprobante se descartaba por no calzar con EEE-PPP."""
+    return serie.lstrip("*").strip()
+
+
 def classify_tax_rate(gravada_bruta: float, iva_bruta: float) -> Tuple[float, float, float, float, float]:
     """Clasifica un comprobante en 10%, 5% o exento probando cuál de las tres hipótesis
     (exento: iva ≈ 0 / gravada*10% ≈ iva / gravada*5% ≈ iva) ajusta MEJOR — no cuál es la
@@ -947,7 +953,7 @@ class IngestionEngine:
     def _serie_fiscal(serie_raw: Any, serie_prefijos: List[str]) -> Optional[str]:
         """Devuelve la serie normalizada, o None si la fila debe descartarse por la serie."""
         serie = str(serie_raw or "").strip()
-        serie_norm = fix_mojibake(serie)
+        serie_norm = _quitar_asteriscos_serie(fix_mojibake(serie))
         if serie_norm.lower() in ["anulación", "anulacion"]:
             return None
         # Algunos locales de Hiopos anteponen un prefijo sin significado fiscal a la
@@ -1218,7 +1224,7 @@ class IngestionEngine:
         if permitidos_norm is not None:
             mask &= tipo_doc_raw_norm_s.isin(permitidos_norm)
 
-        serie_pre_prefijo_s = serie_s.map(lambda v: str(v or "").strip()).map(fix_mojibake)
+        serie_pre_prefijo_s = serie_s.map(lambda v: str(v or "").strip()).map(fix_mojibake).map(_quitar_asteriscos_serie)
         mask &= ~serie_pre_prefijo_s.str.lower().isin(["anulación", "anulacion"])
 
         # Prefijos no fiscales (ej. "FE" de Hiopos): típicamente 0-2 declarados por perfil,

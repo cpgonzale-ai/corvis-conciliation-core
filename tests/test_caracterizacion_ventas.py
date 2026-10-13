@@ -150,3 +150,17 @@ def test_caracterizacion_ventas_universal_con_nc_y_derivacion_de_tasa(motor):
     df = _df_desde_perfil(perfil, filas)
     filas_out, cortes = motor._process_dataframe(df, perfil, "Local Sintetico")
     _comparar_con_golden("ventas_universal", filas_out)
+
+
+def test_hiopos_reconoce_y_quita_los_asteriscos_antes_de_la_serie(motor):
+    perfil = motor.profiles["hiopos_ventas"]
+    filas = [
+        {"celdas": [(1, "Factura venta"), (2, "**001-002"), (3, "0000123"), (5, "2026-05-02"),
+                    (8, "Cliente Sintetico Uno"), (9, "80012345-6"), (11, 90909.09), (12, 9090.91), (13, 100000)]},
+        {"celdas": [(1, "Factura venta"), (2, "001-002"), (3, "0000124"), (5, "2026-05-02"),
+                    (8, "Cliente Sintetico Uno"), (9, "80012345-6"), (11, 90909.09), (12, 9090.91), (13, 100000)]},
+    ]
+    df = _df_desde_perfil(perfil, filas, ancho=14)
+    filas_out, _ = motor._process_dataframe(df, perfil, "Local Sintetico")
+    assert [r["doc"] for r in filas_out] == ["001-002-0000123", "001-002-0000124"]
+    assert IngestionEngine._serie_fiscal("**001-002", []) == "001-002"
