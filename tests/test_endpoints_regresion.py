@@ -69,3 +69,18 @@ def test_ingest_compras_con_duplicados_en_el_libro_devuelve_el_listado_en_el_pas
     d = r.json()["detail"]
     assert d["tipo"] == "comprobantes_duplicados" and d["origen"] == "Libro"
     assert d["detalle"] == [{"comprobante": "001-001-0000695", "ruc": "80129373", "tipo": "Factura", "cantidad": 2, "origen": "Libro"}]
+
+
+def test_excel_de_ventas_incluye_la_columna_fecha_junto_a_documento(cliente):
+    from io import BytesIO
+    from openpyxl import load_workbook
+
+    lado = {"gravada_10": "0,00", "iva_10": "0,00", "gravada_5": "0,00", "iva_5": "0,00", "exenta": "0,00", "total": "0,00"}
+    fila = {"doc": "001-001-0000001", "fecha": "05/10/2026", "tipo_doc": "Factura", "sistema": "S", "local": "L1",
+            "libro": lado, "rg90": lado, "diferencia": "Coincide"}
+    r = cliente.post("/api/export/diff-ventas-excel", json={"rows": [fila], "visible_columns": ["doc", "fecha", "tipo_doc"]})
+    assert r.status_code == 200
+    ws = load_workbook(BytesIO(r.content)).active
+    filas = list(ws.iter_rows(values_only=True))
+    assert filas[0][:3] == ("Documento", "Fecha", "Tipo")
+    assert filas[1][:3] == ("001-001-0000001", "05/10/2026", "Factura")
