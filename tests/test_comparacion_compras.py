@@ -104,3 +104,12 @@ def test_el_resultado_incluye_la_fecha_del_libro_o_la_de_la_rg_si_solo_esta_alli
     res = {d["doc"]: d for d in reconcile_compras_with_rg([libro], [rg])}
     assert res["001-001-0000001"]["fecha"] == "05/10/2026"
     assert res["001-001-0000002"]["fecha"] == "06/10/2026"
+
+
+def test_la_fecha_del_resultado_no_lleva_hora():
+    from app.core.compras_engine import solo_fecha
+    assert solo_fecha("2026-10-05 00:00:00") == "2026-10-05"
+    assert solo_fecha("05/10/2026 13:45") == "05/10/2026"
+    assert solo_fecha("2026-10-05T00:00:00") == "2026-10-05"
+    assert solo_fecha("05/10/2026") == "05/10/2026"
+    assert solo_fecha(None) == ""

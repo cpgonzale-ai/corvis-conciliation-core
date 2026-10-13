@@ -315,11 +315,18 @@ class ComprasEngine:
         return rows
 
 
+def solo_fecha(valor: Any) -> str:
+    """La fecha sin la hora ("2026-10-05 00:00:00" -> "2026-10-05"): el libro puede traer
+    la celda como fecha-hora y la grilla de resultado solo debe mostrar el día."""
+    texto = str(valor or "").strip()
+    return re.split(r"[ T]", texto, maxsplit=1)[0] if texto else ""
+
+
 def _comparar_par_compras(clave: Any, pos_rec: Dict[str, Any] | None, rg_rec: Dict[str, Any] | None) -> Dict[str, Any]:
     """Resultado de _comparar_par_compras_sin_fecha + la fecha del comprobante (la del
     libro; la de la RG si solo existe allí) para la grilla de resultado."""
     res = _comparar_par_compras_sin_fecha(clave, pos_rec, rg_rec)
-    res["fecha"] = str((pos_rec or rg_rec or {}).get("fecha") or "")
+    res["fecha"] = solo_fecha((pos_rec or rg_rec or {}).get("fecha"))
     return res
 
 
