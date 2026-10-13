@@ -57,3 +57,15 @@ def test_rg_corrupta_devuelve_422_con_mensaje_claro_no_500(cliente):
     r = cliente.post("/api/compras/reconcile", files=_archivos_minimos())
     assert r.status_code == 422
     assert r.json()["detail"] == compras_api.MSG_ARCHIVO_NO_VALIDO
+
+
+def test_ingest_compras_con_duplicados_en_el_libro_devuelve_el_listado_en_el_paso_1(cliente, monkeypatch):
+    from tests.fabricas import fila_compras as f
+
+    filas = [f("001-001-000069580129373", 1.0), f("001-001-000069580129373", 2.0), f("001-001-000070080129373", 3.0)]
+    monkeypatch.setattr(compras_api.engine, "ingest_file", lambda *a, **k: filas)
+    r = cliente.post("/api/compras/ingest", files={"files": ("libro.xls", b"x", "application/octet-stream")})
+    assert r.status_code == 422
+    d = r.json()["detail"]
+    assert d["tipo"] == "comprobantes_duplicados" and d["origen"] == "Libro"
+    assert d["detalle"] == [{"comprobante": "001-001-0000695", "ruc": "80129373", "tipo": "Factura", "cantidad": 2, "origen": "Libro"}]

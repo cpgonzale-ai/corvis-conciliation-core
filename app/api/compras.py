@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.core.audit import log_evento as _log_evento
-from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg_iter_pares
+from app.core.compras_engine import ComprasEngine, reconcile_compras_with_rg_iter_pares, tipo_cruce_de, duplicados_en_filas, separar_ruc_en_duplicados
 from app.core.concurrencia import adquirir_operacion_pesada, liberar_operacion_pesada
 from app.core.engine import detect_sequence_gaps, total_faltantes
 from app.core.deps import get_current_user
@@ -60,12 +60,12 @@ async def _cargar_libro_compras_en_sqlite(con, pos_data_file: StarletteUploadFil
     (Ventas), incluido correr en un thread del executor (ver el fix de esta misma sesión
     al event loop de Ventas: ese mismo bloqueo aplica acá igual).
 
-    Compras no tiene clave compuesta (doc, tipo_doc) como Ventas -- su clave de
-    comparación ya es un string único (`clave` = documento + RUC proveedor sin DV, ver
-    compras_engine.py). Se reusa igual el esquema de dos columnas de
-    insertar_lote_diagnosticando_duplicados guardando `clave` en la columna `doc` y
-    dejando `tipo_doc` siempre en "" -- la PK compuesta (doc, "") se comporta como una
-    clave simple sin tener que generalizar esa función (ver app/core/sqlite_cruce.py)."""
+    La identidad de un comprobante de Compras es (tipo, clave): `clave` = documento + RUC
+    proveedor sin DV (ver compras_engine.py) y tipo = Nota de Crédito o Factura (ver
+    tipo_cruce_de). Se guarda `clave` en la columna `doc` y el tipo en `tipo_doc` de
+    insertar_lote_diagnosticando_duplicados, igual que Ventas con (doc, tipo_doc): así una NC
+    y una factura con el mismo número y proveedor no se cuentan como duplicado ni se cruzan
+    entre sí (ver app/core/sqlite_cruce.py)."""
     loop = asyncio.get_event_loop()
 
     def _leer_e_insertar_libro() -> int:
@@ -73,7 +73,7 @@ async def _cargar_libro_compras_en_sqlite(con, pos_data_file: StarletteUploadFil
         cantidad_comprobantes = 0
         lote_insert: list[tuple] = []
         for row in ijson.items(pos_data_file.file, "item", use_float=True):
-            lote_insert.append((row["clave"], "", json.dumps(row)))
+            lote_insert.append((row["clave"], tipo_cruce_de(row), json.dumps(row)))
             cantidad_comprobantes += 1
             if len(lote_insert) >= INSERT_BATCH:
                 insertar_lote_diagnosticando_duplicados(con, "libro", lote_insert, acumulador, origen_default="RG")
@@ -118,7 +118,7 @@ async def _cargar_rg_compras_en_sqlite(con, rg_files: list, acumulador: list | N
                 raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
             rg_rows.extend(file_rows)
 
-    lote_insert = [(r["clave"], "", json.dumps(r)) for r in rg_rows]
+    lote_insert = [(r["clave"], tipo_cruce_de(r), json.dumps(r)) for r in rg_rows]
     INSERT_BATCH = 5000
     for i in range(0, len(lote_insert), INSERT_BATCH):
         insertar_lote_diagnosticando_duplicados(con, "rg", lote_insert[i:i + INSERT_BATCH], acumulador, origen_default="RG")
@@ -188,6 +188,14 @@ async def _ingest_compras_impl(
                 # (compras_sistema) y ni siquiera llega a intentar compras_universal.
                 raise HTTPException(status_code=422, detail=MSG_ARCHIVO_NO_VALIDO)
             all_rows.extend(rows)
+
+    # Duplicados dentro del Libro (mismo tipo + número + RUC): se informan ya en el Paso 1,
+    # con el mismo 422 estructurado que /reconcile (Paso 2), en vez de dejar que el usuario
+    # llegue a comparar para enterarse -- esa comparación los rechazaría igual. Se corta
+    # antes de crear el lote: un libro con duplicados no se guarda.
+    duplicados_libro = duplicados_en_filas(all_rows, "Libro")
+    if duplicados_libro:
+        raise HTTPException(status_code=422, detail=armar_error_duplicados(duplicados_libro, origen_default="RG"))
 
     lote = LoteProcesamiento(
         usuario_id=usuario.id,
@@ -284,7 +292,7 @@ async def reconcile_compras(
         rg_rows = await _cargar_rg_compras_en_sqlite(con, rg_files, duplicados_acumulados)
 
         if duplicados_acumulados:
-            raise HTTPException(status_code=422, detail=armar_error_duplicados(duplicados_acumulados, origen_default="RG"))
+            raise HTTPException(status_code=422, detail=armar_error_duplicados(separar_ruc_en_duplicados(duplicados_acumulados), origen_default="RG"))
 
         con.commit()
         # Saltos de numeración DENTRO de la RG de compras misma (agrupados por proveedor —
@@ -347,18 +355,18 @@ async def reconcile_compras(
             _push(json.dumps(rg_gaps))
             _push(', "diffs": [')
 
-            # EL CRUCE: FULL OUTER JOIN por `doc` (acá es la `clave` de compras, ver
+            # EL CRUCE: FULL OUTER JOIN por (`doc`, `tipo_doc`) -- acá `doc` es la `clave` de
+            # compras y `tipo_doc` es Nota de Crédito o Factura (ver
             # _cargar_libro_compras_en_sqlite) -- simulado con LEFT JOIN + UNION ALL, mismo
             # motivo que /api/reconcile (esta versión de SQLite es anterior a la 3.39).
-            # tipo_doc no hace falta en el JOIN: siempre es "" de los dos lados.
             cursor_join = con.execute("""
                 SELECT l.doc, l.data, r.data
-                FROM libro l LEFT JOIN rg r ON l.doc = r.doc
+                FROM libro l LEFT JOIN rg r ON l.doc = r.doc AND l.tipo_doc = r.tipo_doc
                 UNION ALL
                 SELECT r.doc, NULL, r.data
-                FROM rg r LEFT JOIN libro l ON l.doc = r.doc
+                FROM rg r LEFT JOIN libro l ON l.doc = r.doc AND l.tipo_doc = r.tipo_doc
                 WHERE l.doc IS NULL
-                ORDER BY 1
+                ORDER BY 1, 2
             """)
 
             def _pares_desde_sqlite():

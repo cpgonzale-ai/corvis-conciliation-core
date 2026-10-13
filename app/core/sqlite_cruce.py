@@ -73,9 +73,8 @@ def insertar_lote_diagnosticando_duplicados(con: sqlite3.Connection, tabla: str,
     vez del IntegrityError de SQLite, que no expone ningún valor concreto).
 
     Compras reusa este mismo esquema de dos columnas con "clave" (documento + RUC
-    proveedor sin DV) en `doc` y `tipo_doc` siempre en "" -- su clave de comparación ya es
-    un string único por sí solo, así que la PK compuesta (doc, "") se comporta como una
-    clave simple sin tener que generalizar el esquema (ver app/api/compras.py).
+    proveedor sin DV) en `doc` y el tipo (Nota de Crédito o Factura, ver tipo_cruce_de en
+    compras_engine.py) en `tipo_doc` (ver app/api/compras.py).
 
     acumulador=None (default): comportamiento de siempre, corta ACÁ MISMO con un 422 apenas
     encuentra el primer lote con duplicados (usado por /api/validar-duplicados-libro y

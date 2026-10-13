@@ -26,6 +26,7 @@ acá, donde el export ya trae los montos separados por tasa).
 """
 
 import os
+import re
 import json
 from typing import Any, Dict, List, Tuple
 
@@ -50,6 +51,25 @@ from app.core.engine import (
 # cliente ("Tipo de Documentos RG -libros.xlsx") — cubre todos los formatos con la misma
 # comparación.
 _MARCADORES_NC = ("NC", "NCE", "NOTA DE CRÉDITO", "NOTA DE CREDITO", "NOTA DE CRÉDITO ELECTRONICA", "NOTA DE CREDITO ELECTRONICA")
+
+
+TIPO_CRUCE_NC = "Nota de Crédito"
+TIPO_CRUCE_FACTURA = "Factura"
+
+
+def tipo_cruce_de(fila: Dict[str, Any]) -> str:
+    """Tipo que forma parte de la identidad de un comprobante en la comparación (junto con
+    `clave` = documento + RUC del proveedor): Nota de Crédito o Factura. Una NC y una factura
+    del mismo proveedor pueden tener el mismo número (cada tipo lleva su propia numeración),
+    así que `clave` sola las confundiría como duplicado o las cruzaría entre sí.
+
+    Se deriva de `tipo_comprobante` (con los mismos marcadores que usa _process_dataframe
+    para marcar es_credito) y no de un campo guardado aparte, para que también funcione con
+    filas del libro que el navegador conservó de una carga anterior a este cambio. Cualquier
+    tipo que no sea NC (Factura, Autofactura, Nota de Débito, Boleta, etc.) cuenta como
+    Factura."""
+    tipo = str(fila.get("tipo_comprobante") or fila.get("tipo_doc") or "").strip().upper()
+    return TIPO_CRUCE_NC if tipo in _MARCADORES_NC or tipo == "NOTA DE CRÉDITO" else TIPO_CRUCE_FACTURA
 
 # Códigos abreviados que algunos sistemas de origen usan en la columna "Tipo" en vez del
 # nombre completo del SET (confirmado por el cliente sobre un archivo real de Formato
@@ -295,7 +315,7 @@ class ComprasEngine:
         return rows
 
 
-def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Dict[str, Any] | None) -> Dict[str, Any]:
+def _comparar_par_compras(clave: Any, pos_rec: Dict[str, Any] | None, rg_rec: Dict[str, Any] | None) -> Dict[str, Any]:
     """La lógica de negocio de la comparación, para UN comprobante a la vez -- extraída tal
     cual del loop que tenía reconcile_compras_with_rg (sin cambiar ninguna rama ni regla),
     para poder alimentarla tanto desde los dos mapas completos en memoria (esa función,
@@ -368,15 +388,56 @@ def _comparar_par_compras(clave: str, pos_rec: Dict[str, Any] | None, rg_rec: Di
             }
 
 
+# `clave` = documento + RUC pegados sin separador (ver el docstring del módulo). El
+# documento tiene formato fijo (DOC_PATTERN: [NC]EEE-PPP-NNNNNNN), así que lo que sobra
+# después de él es el RUC del proveedor sin DV.
+_CLAVE_COMPRAS = re.compile(r"^((?:NC)?\d{3}-\d{3}-\d{7})(.*)$")
+
+
+def separar_clave(clave: str) -> Tuple[str, str]:
+    """(documento, ruc) a partir de `clave`. Si no calza con el formato esperado devuelve
+    (clave, "") en vez de fallar: solo se usa para mostrar."""
+    m = _CLAVE_COMPRAS.match(str(clave))
+    return (m.group(1), m.group(2)) if m else (str(clave), "")
+
+
+def separar_ruc_en_duplicados(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Para la pantalla de duplicados: reemplaza `comprobante` (que acá viene como la clave
+    concatenada documento+RUC) por el número de comprobante solo, y agrega `ruc` aparte.
+    Devuelve los mismos items modificados; los que ya traen `ruc` se dejan como están."""
+    for it in items:
+        if "ruc" not in it:
+            it["comprobante"], it["ruc"] = separar_clave(it["comprobante"])
+    return items
+
+
+def duplicados_en_filas(rows: List[Dict[str, Any]], origen: str) -> List[Dict[str, Any]]:
+    """Comprobantes repetidos dentro de UN archivo ya leído: mismo tipo (Nota de Crédito o
+    Factura), mismo número y mismo RUC. Mismo formato de item que arma
+    insertar_lote_diagnosticando_duplicados (más `ruc`), con la cantidad exacta de apariciones,
+    ordenados de más a menos repetidos."""
+    conteos: Dict[Tuple[str, str], int] = {}
+    for r in rows:
+        k = (r["clave"], tipo_cruce_de(r))
+        conteos[k] = conteos.get(k, 0) + 1
+    repetidos = sorted(((k, n) for k, n in conteos.items() if n > 1), key=lambda kv: kv[1], reverse=True)
+    items = [
+        {"comprobante": clave, "tipo": tipo, "cantidad": n, "origen": origen}
+        for (clave, tipo), n in repetidos
+    ]
+    return separar_ruc_en_duplicados(items)
+
+
 def reconcile_compras_with_rg(libro_rows: List[Dict[str, Any]], rg_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Full outer join por clave (documento + RUC del proveedor sin DV) — mismo control por
-    campo (Total/IVA 10%/IVA 5%/Exenta) que `reconcile_with_rg90`, pero con la clave
-    compuesta que exige compras (ver Minuta 5 y la fórmula real del Excel de control del
-    cliente: SUMIF por clave concatenada). Wrapper sobre _comparar_par_compras para quien
+    """Full outer join por (tipo, clave): tipo = Nota de Crédito o Factura (ver tipo_cruce_de)
+    y clave = documento + RUC del proveedor sin DV -- mismo control por campo (Total/IVA
+    10%/IVA 5%/Exenta) que `reconcile_with_rg90`, pero con la clave compuesta que exige
+    compras (ver Minuta 5 y la fórmula real del Excel de control del cliente: SUMIF por clave
+    concatenada, a lo que se suma el tipo). Wrapper sobre _comparar_par_compras para quien
     tenga los dos mapas completos en memoria -- /api/compras/reconcile usa en cambio
     reconcile_compras_with_rg_iter_pares, sobre un cursor de un JOIN en SQLite."""
-    libro_map = {r["clave"]: r for r in libro_rows}
-    rg_map = {r["clave"]: r for r in rg_rows}
+    libro_map = {(r["clave"], tipo_cruce_de(r)): r for r in libro_rows}
+    rg_map = {(r["clave"], tipo_cruce_de(r)): r for r in rg_rows}
 
     all_claves = set(libro_map.keys()).union(set(rg_map.keys()))
     return [_comparar_par_compras(clave, libro_map.get(clave), rg_map.get(clave)) for clave in sorted(all_claves)]

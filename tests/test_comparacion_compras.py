@@ -1,4 +1,4 @@
-from app.core.compras_engine import reconcile_compras_with_rg, reconcile_compras_with_rg_iter_pares
+from app.core.compras_engine import reconcile_compras_with_rg, reconcile_compras_with_rg_iter_pares, tipo_cruce_de, separar_clave, duplicados_en_filas
 from tests.fabricas import fila_compras as f
 
 
@@ -42,11 +42,57 @@ def test_iter_pares_da_el_mismo_resultado_que_la_version_con_mapas():
     libro = [f("A", 1000.0, 100.0), f("B", 1000.0, 100.0), f("C", 1000.0, 100.0), f("D", 500.0)]
     rg = [f("A", 1000.0, 100.0), f("B", 1500.0, 100.0), f("C", 1000.0, 300.0), f("E", 700.0)]
     viejo = reconcile_compras_with_rg(libro, rg)
-    mapa_l = {r["clave"]: r for r in libro}
-    mapa_r = {r["clave"]: r for r in rg}
+    mapa_l = {(r["clave"], tipo_cruce_de(r)): r for r in libro}
+    mapa_r = {(r["clave"], tipo_cruce_de(r)): r for r in rg}
     claves = sorted(set(mapa_l) | set(mapa_r))
     nuevo = list(reconcile_compras_with_rg_iter_pares((c, mapa_l.get(c), mapa_r.get(c)) for c in claves))
     assert viejo == nuevo
     assert [d["diferencia"] for d in nuevo] == [
         "Coincide", "Diferencia de importe", "Diferencias en tasas", "No llegó a la interfaz", "No existe en el libro",
     ]
+
+
+NC = "NOTA DE CRÉDITO"
+
+
+def test_tipo_cruce_distingue_nota_de_credito_de_todo_lo_demas():
+    assert tipo_cruce_de(f("A", 1.0, tipo=NC)) == "Nota de Crédito"
+    assert tipo_cruce_de({"tipo_comprobante": "NC"}) == "Nota de Crédito"
+    assert tipo_cruce_de({"tipo_doc": "Nota de Crédito"}) == "Nota de Crédito"
+    assert tipo_cruce_de(f("A", 1.0, tipo="FACTURA")) == "Factura"
+    assert tipo_cruce_de(f("A", 1.0, tipo="AUTOFACTURA")) == "Factura"
+    assert tipo_cruce_de({}) == "Factura"  # fila vieja sin tipo
+
+
+def test_factura_y_nota_de_credito_con_el_mismo_numero_no_se_cruzan_entre_si():
+    # Mismo documento + RUC (misma clave), distinto tipo: son dos comprobantes distintos.
+    libro = [f("X", 1000.0, tipo="FACTURA"), f("X", -400.0, tipo=NC)]
+    rg = [f("X", 1000.0, tipo="FACTURA"), f("X", -400.0, tipo=NC)]
+    res = reconcile_compras_with_rg(libro, rg)
+    assert [d["diferencia"] for d in res] == ["Coincide", "Coincide"]
+    assert sorted(d["tipo_doc"] for d in res) == ["Factura", "Nota de Crédito"]
+
+
+def test_si_la_rg_solo_tiene_la_factura_la_nc_del_libro_queda_sin_pareja():
+    res = reconcile_compras_with_rg([f("X", 1000.0), f("X", -400.0, tipo=NC)], [f("X", 1000.0)])
+    assert sorted(d["diferencia"] for d in res) == ["Coincide", "No llegó a la interfaz"]
+
+
+def test_separar_clave_divide_el_numero_de_comprobante_del_ruc():
+    assert separar_clave("001-003-000021980102117") == ("001-003-0000219", "80102117")
+    assert separar_clave("NC001-001-00000013509285") == ("NC001-001-0000001", "3509285")
+    assert separar_clave("raro") == ("raro", "")  # no calza: se devuelve tal cual, sin fallar
+
+
+def test_duplicados_en_filas_cuenta_por_tipo_numero_y_ruc():
+    libro = [
+        f("001-001-000069580129373", 1.0), f("001-001-000069580129373", 2.0),   # duplicado
+        f("001-001-000069580129373", -1.0, tipo=NC),                              # NC: no es duplicado
+        f("001-001-000070080129373", 1.0),
+    ]
+    items = duplicados_en_filas(libro, "Libro")
+    assert items == [{
+        "comprobante": "001-001-0000695", "ruc": "80129373", "tipo": "Factura",
+        "cantidad": 2, "origen": "Libro",
+    }]
+    assert duplicados_en_filas([f("A", 1.0), f("B", 1.0)], "Libro") == []

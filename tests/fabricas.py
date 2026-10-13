@@ -10,9 +10,9 @@ def fila_ventas(total, iva=0.0, iva5=0.0, exenta=0.0, estado="Válida", tipo_doc
     }
 
 
-def fila_compras(clave, total, iva=0.0, iva5=0.0, exenta=0.0):
+def fila_compras(clave, total, iva=0.0, iva5=0.0, exenta=0.0, tipo="FACTURA"):
     return {
-        "clave": clave, "doc": clave, "tipo_doc": "Factura", "proveedor": "Proveedor",
+        "clave": clave, "doc": clave, "tipo_comprobante": tipo, "tipo_doc": "Nota de Crédito" if tipo == "NOTA DE CRÉDITO" else "Factura", "proveedor": "Proveedor",
         "sistema": "Compras", "local": "L1",
         "total_num": total, "iva_num": iva, "iva_5_num": iva5, "exentas_num": exenta,
         "gravadas": "0,00", "iva": "0,00", "gravadas_5": "0,00", "iva_5": "0,00",
