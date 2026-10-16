@@ -1338,6 +1338,15 @@ class IngestionEngine:
         ruc_l = ruc_kept.tolist()
         nombre_l = nombre_kept.tolist()
 
+        # Empleado: solo existe en el reporte de Hiopos (perfil con ese mapeo). Los demás
+        # perfiles (Aloha, Universal, RG90) no traen el dato y sus filas no llevan la clave.
+        empleado_l = None
+        if "empleado" in records_df.columns:
+            empleado_kept = records_df["empleado"].loc[idx_keep].map(
+                lambda v: "" if v is None or (isinstance(v, float) and v != v) else str(v).strip()
+            ).map(fix_mojibake)
+            empleado_l = empleado_kept.tolist()
+
         sistema = profile["name"]
         processed_rows = [
             {
@@ -1365,6 +1374,9 @@ class IngestionEngine:
             }
             for i in range(len(idx_keep))
         ]
+        if empleado_l is not None:
+            for i, fila in enumerate(processed_rows):
+                fila["empleado"] = empleado_l[i]
         return processed_rows, cortes
 
 

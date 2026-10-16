@@ -3,6 +3,7 @@
   "filas": [
     {
       "doc": "045-001-0000123",
+      "empleado": "Empleado Uno",
       "estado": "Válida",
       "exentas": "0,00",
       "exentas_num": 0.0,
@@ -26,6 +27,7 @@
     },
     {
       "doc": "001-001-0000005",
+      "empleado": "",
       "estado": "Válida",
       "exentas": "0,00",
       "exentas_num": 0.0,

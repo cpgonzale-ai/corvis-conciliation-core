@@ -15,6 +15,7 @@
     {"source_col": 5, "target_field": "fecha", "type": "date"},
     {"source_col": 8, "target_field": "nombre_cliente", "type": "string"},
     {"source_col": 9, "target_field": "ruc", "type": "string"},
+    {"source_col": 10, "target_field": "empleado", "type": "string"},
     {"source_col": 11, "target_field": "gravada_bruta", "type": "numeric"},
     {"source_col": 12, "target_field": "iva_bruta", "type": "numeric"},
     {"source_col": 13, "target_field": "total", "type": "numeric"}

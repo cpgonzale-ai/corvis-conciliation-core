@@ -110,7 +110,7 @@ def test_caracterizacion_ventas_hiopos_con_filtro_de_tipos_y_prefijos(motor):
     perfil = motor.profiles["hiopos_ventas"]
     filas = [
         {"celdas": [(1, "Factura venta"), (2, "FE045-001"), (3, "0000123"), (5, "2026-05-02"),
-                    (8, "Cliente Sintetico Uno"), (9, "80012345-6"), (11, 90909.09), (12, 9090.91), (13, 100000)]},
+                    (8, "Cliente Sintetico Uno"), (9, "80012345-6"), (10, "Empleado Uno"), (11, 90909.09), (12, 9090.91), (13, 100000)]},
         {"celdas": [(1, "Abono factura venta"), (2, "001-001"), (3, "0000005"), (5, "2026-05-03"),
                     (8, "Cliente Sintetico Dos"), (9, "80099999-1"), (11, 4545.45), (12, 454.55), (13, 5000)]},
         {"celdas": [(1, "Pedido"), (2, "001-001"), (3, "0000009"), (5, "2026-05-04"),
