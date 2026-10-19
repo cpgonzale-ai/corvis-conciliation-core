@@ -113,3 +113,18 @@ def test_la_fecha_del_resultado_no_lleva_hora():
     assert solo_fecha("2026-10-05T00:00:00") == "2026-10-05"
     assert solo_fecha("05/10/2026") == "05/10/2026"
     assert solo_fecha(None) == ""
+
+
+def test_nota_de_credito_se_reconoce_con_o_sin_tildes_y_en_cualquier_variante():
+    from app.core.compras_engine import es_nota_de_credito
+    for t in ["NC", "NCE", "NOTA DE CRÉDITO", "NOTA DE CREDITO", "Nota de Crédito", "NOTA DE CRÉDITO ELECTRONICA",
+              "NOTA DE CRÉDITO ELECTRÓNICA", "NOTA DE CREDITO ELECTRÓNICA", "NOTA DE CRÉDITO  ELECTRONICA"]:
+        assert es_nota_de_credito(t), t
+    for t in ["FACTURA", "FACTURA ELECTRÓNICA", "NOTA DE DÉBITO", "NOTA DE DÉBITO ELECTRONICA", "AUTOFACTURA", "", None]:
+        assert not es_nota_de_credito(t), t
+
+
+def test_factura_y_nota_de_credito_electronica_con_tilde_no_son_duplicado():
+    fac = f("001-001-0000001" + "80016096", 100.0)
+    nc = {**f("001-001-0000001" + "80016096", -100.0, tipo="NOTA DE CRÉDITO ELECTRÓNICA"), "tipo_doc": "Nota de Crédito"}
+    assert duplicados_en_filas([fac, nc], "Libro") == []

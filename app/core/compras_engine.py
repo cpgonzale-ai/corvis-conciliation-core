@@ -51,6 +51,18 @@ from app.core.engine import (
 # cliente ("Tipo de Documentos RG -libros.xlsx") — cubre todos los formatos con la misma
 # comparación.
 _MARCADORES_NC = ("NC", "NCE", "NOTA DE CRÉDITO", "NOTA DE CREDITO", "NOTA DE CRÉDITO ELECTRONICA", "NOTA DE CREDITO ELECTRONICA")
+_MARCADORES_NC_NORM = {_normalizar_tipo(m) for m in _MARCADORES_NC}
+
+
+def es_nota_de_credito(tipo: Any) -> bool:
+    """True si el tipo de comprobante es una Nota de Crédito, sin importar tildes, mayúsculas
+    ni espacios repetidos ("NOTA DE CRÉDITO ELECTRÓNICA" tiene tilde en la Ó, que
+    _MARCADORES_NC no lista). Igual que el filtro por tipo permitido, que ya compara con
+    _normalizar_tipo: antes ese filtro dejaba pasar la variante con tilde pero esta
+    detección no la reconocía, y la NC se trataba como Factura (signo positivo y, con el
+    mismo número y proveedor que una factura, aparecía como duplicado)."""
+    t = " ".join(_normalizar_tipo(str(tipo or "")).split())
+    return t in _MARCADORES_NC_NORM or t.startswith("NOTA DE CREDITO")
 
 
 TIPO_CRUCE_NC = "Nota de Crédito"
@@ -68,8 +80,7 @@ def tipo_cruce_de(fila: Dict[str, Any]) -> str:
     filas del libro que el navegador conservó de una carga anterior a este cambio. Cualquier
     tipo que no sea NC (Factura, Autofactura, Nota de Débito, Boleta, etc.) cuenta como
     Factura."""
-    tipo = str(fila.get("tipo_comprobante") or fila.get("tipo_doc") or "").strip().upper()
-    return TIPO_CRUCE_NC if tipo in _MARCADORES_NC or tipo == "NOTA DE CRÉDITO" else TIPO_CRUCE_FACTURA
+    return TIPO_CRUCE_NC if es_nota_de_credito(fila.get("tipo_comprobante") or fila.get("tipo_doc")) else TIPO_CRUCE_FACTURA
 
 # Códigos abreviados que algunos sistemas de origen usan en la columna "Tipo" en vez del
 # nombre completo del SET (confirmado por el cliente sobre un archivo real de Formato
@@ -266,7 +277,7 @@ class ComprasEngine:
                 continue
             clave = f"{doc}{ruc}"
 
-            es_credito = tipo_comprobante.upper() in _MARCADORES_NC
+            es_credito = es_nota_de_credito(tipo_comprobante)
             signo = -1 if es_credito else 1
 
             gravada_10 = signo * abs(clean_numeric(gravada_10_l[idx]))
