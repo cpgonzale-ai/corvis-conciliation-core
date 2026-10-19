@@ -337,7 +337,11 @@ def _comparar_par_compras(clave: Any, pos_rec: Dict[str, Any] | None, rg_rec: Di
     """Resultado de _comparar_par_compras_sin_fecha + la fecha del comprobante (la del
     libro; la de la RG si solo existe allí) para la grilla de resultado."""
     res = _comparar_par_compras_sin_fecha(clave, pos_rec, rg_rec)
-    res["fecha"] = solo_fecha((pos_rec or rg_rec or {}).get("fecha"))
+    base = pos_rec or rg_rec or {}
+    res["fecha"] = solo_fecha(base.get("fecha"))
+    # RUC del proveedor (con DV si lo trae): solo lo usa el Excel del resultado.
+    ruc, dv = str(base.get("ruc_proveedor") or ""), str(base.get("dv_proveedor") or "")
+    res["ruc"] = f"{ruc}-{dv}" if ruc and dv else ruc
     return res
 
 

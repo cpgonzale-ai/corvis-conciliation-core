@@ -219,6 +219,8 @@ _CAMPOS = list(_ETIQUETAS_CAMPO.keys())
 DIFF_VENTAS_COLUMNAS: list[tuple[str, str, "callable"]] = [
     ("doc", "Documento", lambda d: d.doc),
     ("fecha", "Fecha", lambda d: d.fecha or ""),
+    ("ruc", "RUC Cliente", lambda d: d.ruc or ""),
+    ("nombre", "Nombre Cliente", lambda d: d.nombre or ""),
     ("tipo_doc", "Tipo", lambda d: d.tipo_doc),
     ("sistema", "Sistema", lambda d: d.sistema),
     ("local", "Local", lambda d: d.local),

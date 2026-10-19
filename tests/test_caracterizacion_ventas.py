@@ -164,3 +164,16 @@ def test_hiopos_reconoce_y_quita_los_asteriscos_antes_de_la_serie(motor):
     filas_out, _ = motor._process_dataframe(df, perfil, "Local Sintetico")
     assert [r["doc"] for r in filas_out] == ["001-002-0000123", "001-002-0000124"]
     assert IngestionEngine._serie_fiscal("**001-002", []) == "001-002"
+
+
+def test_el_resultado_de_ventas_incluye_ruc_y_nombre_del_cliente():
+    from app.core.engine import _comparar_par
+
+    def fila(total):
+        return {"doc": "001-001-0000001", "tipo_doc": "Factura", "sistema": "S", "local": "L1", "estado": "Válida",
+                "fecha": "05/10/2026", "ruc": "80012345-6", "nombre": "Cliente Uno", "total_num": total,
+                "gravadas": "0,00", "iva": "0,00", "gravadas_5": "0,00", "iva_5": "0,00", "exentas": "0,00", "total": "0,00"}
+    res = _comparar_par("001-001-0000001", fila(100.0), None)
+    assert (res["ruc"], res["nombre"]) == ("80012345-6", "Cliente Uno")
+    res = _comparar_par("001-001-0000001", None, fila(100.0))
+    assert (res["ruc"], res["nombre"]) == ("80012345-6", "Cliente Uno")

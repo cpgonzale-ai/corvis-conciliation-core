@@ -27,6 +27,8 @@ class RG90DiffLadoIn(BaseModel):
 class RG90DiffRowIn(BaseModel):
     doc: str
     fecha: Optional[str] = None
+    ruc: Optional[str] = None
+    nombre: Optional[str] = None
     tipo_doc: str
     sistema: str
     local: str

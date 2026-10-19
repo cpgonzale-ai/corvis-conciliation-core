@@ -128,3 +128,11 @@ def test_factura_y_nota_de_credito_electronica_con_tilde_no_son_duplicado():
     fac = f("001-001-0000001" + "80016096", 100.0)
     nc = {**f("001-001-0000001" + "80016096", -100.0, tipo="NOTA DE CRÉDITO ELECTRÓNICA"), "tipo_doc": "Nota de Crédito"}
     assert duplicados_en_filas([fac, nc], "Libro") == []
+
+
+def test_el_resultado_incluye_el_ruc_del_proveedor_con_dv_si_lo_trae():
+    libro = {**f("001-001-0000001", 100.0), "ruc_proveedor": "80016096", "dv_proveedor": "7"}
+    rg = {**f("001-001-0000002", 100.0), "ruc_proveedor": "80016096", "dv_proveedor": ""}
+    res = {d["doc"]: d for d in reconcile_compras_with_rg([libro], [rg])}
+    assert res["001-001-0000001"]["ruc"] == "80016096-7"
+    assert res["001-001-0000002"]["ruc"] == "80016096"

@@ -1480,7 +1480,11 @@ def _comparar_par(doc: str, pos_rec: Optional[Dict[str, Any]], rg_rec: Optional[
     """Resultado de _comparar_par_sin_fecha + la fecha del comprobante (la del libro; la de
     la RG90 si solo existe allí) para la grilla de resultado."""
     res = _comparar_par_sin_fecha(doc, pos_rec, rg_rec)
-    res["fecha"] = str((pos_rec or rg_rec or {}).get("fecha") or "")
+    base = pos_rec or rg_rec or {}
+    res["fecha"] = str(base.get("fecha") or "")
+    # RUC y nombre del cliente: solo los usa el Excel del resultado.
+    res["ruc"] = str(base.get("ruc") or "")
+    res["nombre"] = str(base.get("nombre") or "")
     return res
 
 
